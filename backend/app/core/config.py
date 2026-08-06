@@ -1,0 +1,112 @@
+"""Configurazione applicativa.
+
+Tutti i segreti sono `SecretStr`: il loro valore non compare mai in un `repr()`,
+in un log strutturato o in una risposta di errore. L'accesso al valore reale
+richiede sempre `.get_secret_value()` esplicito, che rende il punto di utilizzo
+grep-abile in fase di review.
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+
+from pydantic import Field, SecretStr, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Variabili d'ambiente del backend Picox."""
+
+    model_config = SettingsConfigDict(
+        # `backend/.env` ha precedenza sul `.env` di root del monorepo.
+        env_file=("../.env", ".env"),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    # --- Ambiente ------------------------------------------------------------
+    environment: str = Field(default="development")
+    log_level: str = Field(default="INFO")
+
+    # --- Supabase ------------------------------------------------------------
+    supabase_url: str
+    supabase_anon_key: SecretStr
+    supabase_service_role_key: SecretStr
+
+    # Segreto HS256 legacy dei progetti Supabase (Settings -> API -> JWT Secret).
+    # Se assente si verifica il JWT con le chiavi asimmetriche esposte da JWKS.
+    supabase_jwt_secret: SecretStr | None = None
+    supabase_jwt_audience: str = "authenticated"
+
+    # --- Gemini --------------------------------------------------------------
+    gemini_api_key: SecretStr
+    gemini_model: str = "gemini-2.5-flash"
+    gemini_timeout_seconds: int = 300
+    # Attesa massima perché il file caricato passi in stato ACTIVE.
+    gemini_file_active_timeout_seconds: int = 120
+
+    # --- Apify ---------------------------------------------------------------
+    apify_api_token: SecretStr
+    apify_instagram_actor: str = "apify/instagram-scraper"
+    apify_tiktok_actor: str = "clockworks/tiktok-scraper"
+    apify_youtube_actor: str = "streamers/youtube-scraper"
+    apify_timeout_seconds: int = 180
+    # Quanti video recenti richiedere per creator a ogni giro di cron.
+    apify_results_per_creator: int = 10
+
+    # --- Applicazione --------------------------------------------------------
+    frontend_url: str = "http://localhost:3000"
+    backend_url: str = "http://localhost:8000"
+    cron_secret: SecretStr
+
+    # --- Limiti di ingestione video -----------------------------------------
+    max_video_mb: int = Field(default=200, ge=1)
+    max_video_duration_seconds: int = Field(default=600, ge=1)
+    download_timeout_seconds: int = 120
+    # Analisi in background eseguite in parallelo dal job cron.
+    cron_max_concurrent_analyses: int = Field(default=2, ge=1)
+
+    @field_validator("supabase_url")
+    @classmethod
+    def _strip_trailing_slash(cls, value: str) -> str:
+        return value.rstrip("/")
+
+    @property
+    def max_video_bytes(self) -> int:
+        return self.max_video_mb * 1024 * 1024
+
+    @property
+    def jwks_url(self) -> str:
+        """Endpoint delle chiavi pubbliche per i progetti con JWT asimmetrici."""
+        return f"{self.supabase_url}/auth/v1/.well-known/jwks.json"
+
+    @property
+    def cors_origins(self) -> list[str]:
+        """Origin ammessi dal CORS: solo il frontend configurato.
+
+        In sviluppo il frontend gira spesso su `localhost` e `127.0.0.1`
+        indifferentemente: entrambe le forme vengono ammesse per non costringere
+        a due configurazioni diverse. In produzione l'elenco resta il solo
+        `FRONTEND_URL`.
+        """
+        origin = self.frontend_url.rstrip("/")
+        if not origin:
+            return []
+        origins = [origin]
+        if not self.is_production:
+            if "localhost" in origin:
+                origins.append(origin.replace("localhost", "127.0.0.1"))
+            elif "127.0.0.1" in origin:
+                origins.append(origin.replace("127.0.0.1", "localhost"))
+        return origins
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment.lower() in {"production", "prod"}
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Istanza singleton delle impostazioni (usata anche come dependency FastAPI)."""
+    return Settings()  # type: ignore[call-arg]  # i campi arrivano dall'ambiente

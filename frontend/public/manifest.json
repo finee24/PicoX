@@ -1,0 +1,35 @@
+{
+  "name": "Picox — Insight dai video brevi",
+  "short_name": "Picox",
+  "description": "Analizza Reels, TikTok e Shorts con AI multimodale ed estrai insight riutilizzabili.",
+  "start_url": "/dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0a",
+  "theme_color": "#0a0a0a",
+  "orientation": "portrait-primary",
+  "categories": ["productivity", "utilities"],
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ],
+  "share_target": {
+    "action": "/dashboard",
+    "method": "GET",
+    "params": {
+      "url": "shared_url",
+      "text": "shared_text",
+      "title": "shared_title"
+    }
+  }
+}

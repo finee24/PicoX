@@ -1,0 +1,47 @@
+# ---- Secrets ----------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# ---- Node / frontend --------------------------------------------------------
+node_modules/
+.pnpm-store/
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+.turbo/
+.vercel/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- Python / backend -------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# ---- Supabase CLI -----------------------------------------------------------
+supabase/.temp/
+supabase/.branches/
+
+# ---- Claude Code ------------------------------------------------------------
+# Permessi e path assoluti della singola macchina: non vanno condivisi.
+# Skill e agent di progetto (.claude/skills/, .claude/agents/) restano tracciati.
+.claude/settings.local.json
+
+# ---- Tooling / editor -------------------------------------------------------
+coverage/
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# ---- OS ---------------------------------------------------------------------
+.DS_Store
+Thumbs.db

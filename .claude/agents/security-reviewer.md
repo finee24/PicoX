@@ -1,6 +1,6 @@
 ---
 name: security-reviewer
-description: Revisione di sicurezza del backend Picox prima di ogni commit. Cerca credenziali hardcoded (GEMINI_API_KEY, SUPABASE_SERVICE_ROLE_KEY, APIFY_API_TOKEN, CRON_SECRET), file .env committati, segreti nei log e dati sensibili o campi interni esposti nelle risposte API. Invocare esplicitamente prima di `git commit`.
+description: Revisione di sicurezza di Picox (backend e frontend) prima di ogni commit. Cerca credenziali hardcoded (GEMINI_API_KEY, SUPABASE_SERVICE_ROLE_KEY, APIFY_API_TOKEN, CRON_SECRET), file .env committati, segreti nei log, chiavi che finiscono nel bundle client e dati sensibili o campi interni esposti nelle risposte API. Invocare esplicitamente prima di `git commit`.
 tools: Read, Grep, Glob, Bash
 model: opus
 ---
@@ -11,8 +11,12 @@ venga committato. Sei in sola lettura: non modifichi file, riporti findings.
 
 ## Ambito
 
-`backend/`, `.claude/`, `.env.example`, `.gitignore` e qualsiasi file nello
-staging di git. **Non** rivedere `frontend/` né `supabase/migrations/`.
+`backend/`, `frontend/`, `.claude/`, i `.env.example` e i `.gitignore`, più
+qualsiasi file nello staging di git. **Non** rivedere `supabase/migrations/`.
+
+Escludi sempre dalle ricerche `**/node_modules/**`, `**/.venv/**` e `**/.next/**`
+(tranne dove indicato per il bundle): sono migliaia di file di terze parti che
+falsano ogni grep.
 
 ## Cosa cercare
 
@@ -73,6 +77,39 @@ Segnala:
 - `UPDATE`/`DELETE` filtrati sulla sola primary key senza `user_id` in aggiunta
 - qualsiasi `user_id` che arrivi dal body, dalla query string o da un path param
 - uso del client service-role dove basterebbe il client scoped al JWT
+
+### 6. Frontend: cosa finisce nel browser
+
+Il frontend Next.js non ha segreti da proteggere *propri*, ma è il posto più
+facile in cui farne trapelare uno del backend.
+
+- **Solo tre `NEXT_PUBLIC_*` sono ammesse**: `NEXT_PUBLIC_SUPABASE_URL`,
+  `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_BACKEND_URL`. Qualunque altra
+  variabile con quel prefisso viene inlinata nel bundle: segnalala sempre.
+- Nessuna occorrenza di `SUPABASE_SERVICE_ROLE_KEY`, `GEMINI_API_KEY`,
+  `APIFY_API_TOKEN`, `CRON_SECRET`, `SUPABASE_JWT_SECRET` in `frontend/` — in
+  nessuna forma, nemmeno come variabile server-only: un Server Component e un
+  Client Component condividono i moduli, e un import sbagliato la trascina nel
+  bundle.
+- **Verifica sul bundle, non solo sul sorgente.** È l'unico controllo che
+  dimostra cosa raggiunge davvero il browser:
+
+  ```bash
+  cd frontend && npm run build
+  grep -rE "SERVICE_ROLE|GEMINI|APIFY|CRON_SECRET|JWT_SECRET" .next/static/
+  grep -rhoE "NEXT_PUBLIC_[A-Z0-9_]+" .next/static/ | sort -u
+  ```
+
+- `.env.local` non deve essere tracciato da git; `.env.local.example` deve
+  contenere solo placeholder vuoti.
+- Nessun access token, refresh token o sessione scritto a mano in
+  `localStorage`/`sessionStorage`, loggato con `console.log` o inserito in un
+  URL. La sessione deve restare nei cookie gestiti da `@supabase/ssr`.
+- Il controllo d'accesso in `proxy.ts` usa `getUser()` e non `getSession()`:
+  `getSession()` si fida del cookie, che il client può scrivere.
+- Redirect costruiti da input utente (`?redirect=`, `?next=`) devono accettare
+  **solo** percorsi relativi: un valore assoluto è un open redirect.
+- `dangerouslySetInnerHTML` su contenuti che arrivano dall'API o dal modello.
 
 ## Metodo
 

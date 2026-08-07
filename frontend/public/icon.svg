@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Picox">
+  <defs>
+    <linearGradient id="picox" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="100%" stop-color="#a78bfa"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#0a0a0a"/>
+  <!-- Riquadro del video -->
+  <rect x="112" y="136" width="288" height="240" rx="32" fill="none" stroke="url(#picox)" stroke-width="26"/>
+  <!-- Play: il contenuto analizzato -->
+  <path d="M228 208 L316 256 L228 304 Z" fill="url(#picox)"/>
+</svg>

@@ -92,9 +92,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # La versione di Node si legge da `frontend/.nvmrc`, non da un numero
+      # scritto qui. Quando le due fonti erano separate hanno divergito: il
+      # lockfile veniva rigenerato in locale con Node 24 (npm 11) mentre la CI
+      # girava su Node 22 (npm 10), e le due major di npm registrano
+      # diversamente le dipendenze opzionali transitive — `npm ci` si fermava
+      # con EUSAGE su `@emnapi/core` e `@emnapi/runtime`.
+      #
+      # Con `node-version-file` esiste un solo numero, e lo leggono sia questo
+      # workflow sia i version manager di chi sviluppa. `engines.node` in
+      # `package.json` lo rende verificabile anche fuori di qui.
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 

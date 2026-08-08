@@ -68,7 +68,7 @@ class CreatorUpdate(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _at_least_one_field(self) -> "CreatorUpdate":
+    def _at_least_one_field(self) -> CreatorUpdate:
         if self.analysis_mode is None and self.is_active is None:
             raise ValueError("Specificare almeno uno tra 'analysis_mode' e 'is_active'.")
         return self

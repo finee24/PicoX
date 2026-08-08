@@ -123,7 +123,7 @@ async def close_service_client() -> None:
     if _service_client is not None:
         try:
             await _service_client.postgrest.aclose()
-        except Exception:  # noqa: BLE001 — lo shutdown non deve mai fallire
+        except Exception:
             logger.debug("Chiusura del client service-role non riuscita.", exc_info=True)
         _service_client = None
 
@@ -159,7 +159,7 @@ async def scoped_client(
     finally:
         try:
             await client.postgrest.aclose()
-        except Exception:  # noqa: BLE001 — non deve mascherare l'errore della route
+        except Exception:
             logger.debug("Chiusura del client scoped non riuscita.", exc_info=True)
 
 
@@ -176,7 +176,7 @@ class ScopedServiceTable:
     codice. Non espone un accesso grezzo alla tabella.
     """
 
-    __slots__ = ("_client", "_table", "_user_id", "_column")
+    __slots__ = ("_client", "_column", "_table", "_user_id")
 
     def __init__(self, client: AsyncClient, table: str, user_id: str) -> None:
         if not user_id:

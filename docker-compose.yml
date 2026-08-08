@@ -1,0 +1,72 @@
+# =============================================================================
+# Picox — sviluppo locale
+# =============================================================================
+# Avvia il solo backend FastAPI. Il database **non** è in questo compose: il
+# progetto punta a un'istanza Supabase remota, che è anche l'unico modo per far
+# funzionare l'autenticazione (i JWT vanno verificati contro le chiavi di quel
+# progetto) e le policy RLS reali.
+#
+#   docker compose up --build      avvia il backend su http://localhost:8001
+#   docker compose logs -f api     segue i log
+#   docker compose down            ferma tutto
+#
+# Il frontend resta fuori: `cd frontend && npm run dev` dà hot reload immediato,
+# mentre in container servirebbe un rebuild o un mount di node_modules che su
+# Windows è lento. Punta al backend tramite NEXT_PUBLIC_BACKEND_URL.
+
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    # Nome esplicito: `docker compose logs picox-api` invece di ricordarsi il
+    # prefisso generato dalla cartella.
+    container_name: picox-api
+
+    env_file:
+      - ./backend/.env
+
+    environment:
+      # Il file `.env` è pensato per l'esecuzione sulla macchina host: queste
+      # tre chiavi vanno riscritte per il contesto container.
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      PORT: "8000"
+      # Deve restare l'origin *del browser*, non quello del container: il CORS
+      # confronta l'header `Origin` che manda Chrome, non l'indirizzo di rete
+      # da cui la richiesta entra nel container.
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      BACKEND_URL: http://localhost:${BACKEND_PORT:-8001}
+
+    ports:
+      # 8001 sull'host per combaciare con NEXT_PUBLIC_BACKEND_URL del frontend
+      # e per non contendere la porta con un uvicorn avviato a mano.
+      - "${BACKEND_PORT:-8001}:8000"
+
+    volumes:
+      # Hot reload: si monta solo il codice, non l'intera cartella. Montare
+      # `./backend` intero sovrascriverebbe anche le dipendenze installate
+      # nell'immagine e il container non partirebbe più.
+      - ./backend/app:/app/app:ro
+      - ./backend/prompts:/app/prompts:ro
+      - ./backend/scripts:/app/scripts:ro
+
+    # Verifica della configurazione prima di uvicorn: se manca una variabile il
+    # container esce subito con un messaggio che dice quale, invece di partire e
+    # fallire alla prima richiesta autenticata.
+    command: >
+      sh -c "python scripts/check_env.py &&
+             exec uvicorn app.main:app
+                  --host 0.0.0.0
+                  --port 8000
+                  --reload
+                  --reload-dir /app/app
+                  --proxy-headers"
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+    restart: unless-stopped

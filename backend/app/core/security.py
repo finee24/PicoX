@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from app.core.config import Settings, get_settings
 from app.core.exceptions import AuthError
+from app.core.observability import bind_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,12 @@ async def verify_supabase_jwt(token: str, settings: Settings) -> AuthenticatedUs
         # stato emesso da questo progetto.
         logger.info("Rifiutato JWT valido ma privo del claim 'sub'.")
         raise AuthError("Token non valido o scaduto.")
+
+    # Da qui in avanti ogni riga di log della richiesta porta l'utente. Il bind
+    # avviene *dopo* la verifica della firma: agganciare il `sub` di un token
+    # non verificato produrrebbe log che attribuiscono attività a un utente che
+    # non ha fatto nulla.
+    bind_user_id(str(subject))
 
     return AuthenticatedUser(
         id=str(subject),

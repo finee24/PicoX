@@ -78,51 +78,50 @@ async def list_insights(
     """
     offset = (page - 1) * limit
 
-    async with db_errors("select insights"):
-        async with scoped_client(user.access_token, settings) as db:
-            query = (
-                db.table("insights")
-                .select("*", count=CountMethod.exact)
-                .eq("user_id", user.id)
-            )
+    async with db_errors("select insights"), scoped_client(user.access_token, settings) as db:
+        query = (
+            db.table("insights")
+            .select("*", count=CountMethod.exact)
+            .eq("user_id", user.id)
+        )
 
-            if creator_id is not None:
-                query = query.eq("creator_id", str(creator_id))
+        if creator_id is not None:
+            query = query.eq("creator_id", str(creator_id))
 
-            if mode is not None:
-                if mode == "SCRIPT":
-                    # Filtro sulla *presenza* dello script, non sulla modalità:
-                    # un record BOTH senza script non deve comparire, e in futuro
-                    # uno script potrebbe essere generato anche altrove.
-                    query = query.not_.is_("inverse_script_template", "null")
-                else:
-                    query = query.eq("analysis_mode", mode)
+        if mode is not None:
+            if mode == "SCRIPT":
+                # Filtro sulla *presenza* dello script, non sulla modalità:
+                # un record BOTH senza script non deve comparire, e in futuro
+                # uno script potrebbe essere generato anche altrove.
+                query = query.not_.is_("inverse_script_template", "null")
+            else:
+                query = query.eq("analysis_mode", mode)
 
-            if search:
-                term = _sanitize_search(search)
-                if term:
-                    # `keywords.cs.{term}` sfrutta l'indice GIN ma richiede la
-                    # keyword esatta; gli `ilike` coprono le corrispondenze
-                    # parziali sui campi testuali del payload INFO.
-                    # Evoluzione naturale quando la tabella cresce: una colonna
-                    # tsvector generata su summary_data + keywords con indice GIN,
-                    # e qui un solo `text_search`.
-                    query = query.or_(
-                        ",".join(
-                            (
-                                f"keywords.cs.{{{term}}}",
-                                f"summary_data->>summary.ilike.*{term}*",
-                                f"summary_data->>main_topic.ilike.*{term}*",
-                                f"summary_data->>value_proposition.ilike.*{term}*",
-                            )
+        if search:
+            term = _sanitize_search(search)
+            if term:
+                # `keywords.cs.{term}` sfrutta l'indice GIN ma richiede la
+                # keyword esatta; gli `ilike` coprono le corrispondenze
+                # parziali sui campi testuali del payload INFO.
+                # Evoluzione naturale quando la tabella cresce: una colonna
+                # tsvector generata su summary_data + keywords con indice GIN,
+                # e qui un solo `text_search`.
+                query = query.or_(
+                    ",".join(
+                        (
+                            f"keywords.cs.{{{term}}}",
+                            f"summary_data->>summary.ilike.*{term}*",
+                            f"summary_data->>main_topic.ilike.*{term}*",
+                            f"summary_data->>value_proposition.ilike.*{term}*",
                         )
                     )
+                )
 
-            result = await (
-                query.order("created_at", desc=True)
-                .range(offset, offset + limit - 1)
-                .execute()
-            )
+        result = await (
+            query.order("created_at", desc=True)
+            .range(offset, offset + limit - 1)
+            .execute()
+        )
 
     items = [InsightResponse.model_validate(row) for row in result.data or []]
     total = result.count if result.count is not None else len(items)

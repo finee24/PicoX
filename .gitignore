@@ -3,6 +3,13 @@
 .env.*
 !.env.example
 
+# ---- Log --------------------------------------------------------------------
+# Non è una questione di rumore: a livello DEBUG le librerie HTTP/2 (hpack)
+# stampano ogni header della richiesta, `apikey` compresa. Un backend.log
+# committato equivale a pubblicare la service_role key — è già successo una
+# volta su questo progetto.
+*.log
+
 # ---- Node / frontend --------------------------------------------------------
 node_modules/
 .pnpm-store/

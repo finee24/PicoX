@@ -12,7 +12,7 @@ l'API non cambierebbe comportamento.
 from __future__ import annotations
 
 import logging
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Response, status
@@ -56,7 +56,7 @@ async def create_creator(
     database: affidarsi a un SELECT preventivo lascerebbe aperta la finestra fra
     controllo e insert. La violazione viene tradotta in 409.
     """
-    record = {
+    record: dict[str, Any] = {
         "user_id": user.id,
         "username": payload.username,
         "platform": payload.platform,
@@ -64,9 +64,8 @@ async def create_creator(
         "is_active": payload.is_active,
     }
 
-    async with db_errors("insert creator"):
-        async with scoped_client(user.access_token, settings) as db:
-            result = await db.table("creators").insert(record).execute()
+    async with db_errors("insert creator"), scoped_client(user.access_token, settings) as db:
+        result = await db.table("creators").insert(record).execute()
 
     if not result.data:
         # Con il RLS attivo un insert che non torna nulla significa che la policy
@@ -87,15 +86,14 @@ async def list_creators(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> CreatorListResponse:
     """Tutti i creator dell'utente, dal più recente."""
-    async with db_errors("select creators"):
-        async with scoped_client(user.access_token, settings) as db:
-            result = await (
-                db.table("creators")
-                .select("*")
-                .eq("user_id", user.id)
-                .order("created_at", desc=True)
-                .execute()
-            )
+    async with db_errors("select creators"), scoped_client(user.access_token, settings) as db:
+        result = await (
+            db.table("creators")
+            .select("*")
+            .eq("user_id", user.id)
+            .order("created_at", desc=True)
+            .execute()
+        )
 
     items = [CreatorResponse.model_validate(row) for row in result.data or []]
     return CreatorListResponse(items=items, total=len(items))
@@ -124,17 +122,16 @@ async def update_creator(
     """
     changes = payload.changed_fields()
 
-    async with db_errors("update creator"):
-        async with scoped_client(user.access_token, settings) as db:
-            result = await (
-                db.table("creators")
-                .update(changes)
-                # La PK da sola non basta come filtro: `user_id` è ciò che rende
-                # impossibile toccare la riga di un altro tenant.
-                .eq("id", str(creator_id))
-                .eq("user_id", user.id)
-                .execute()
-            )
+    async with db_errors("update creator"), scoped_client(user.access_token, settings) as db:
+        result = await (
+            db.table("creators")
+            .update(changes)
+            # La PK da sola non basta come filtro: `user_id` è ciò che rende
+            # impossibile toccare la riga di un altro tenant.
+            .eq("id", str(creator_id))
+            .eq("user_id", user.id)
+            .execute()
+        )
 
     if not result.data:
         raise NotFoundError("Creator non trovato.")
@@ -163,15 +160,14 @@ async def delete_creator(
     `ON DELETE SET NULL`, perché l'analisi è già stata pagata in token e resta
     di valore anche senza il creator di provenienza.
     """
-    async with db_errors("delete creator"):
-        async with scoped_client(user.access_token, settings) as db:
-            result = await (
-                db.table("creators")
-                .delete()
-                .eq("id", str(creator_id))
-                .eq("user_id", user.id)
-                .execute()
-            )
+    async with db_errors("delete creator"), scoped_client(user.access_token, settings) as db:
+        result = await (
+            db.table("creators")
+            .delete()
+            .eq("id", str(creator_id))
+            .eq("user_id", user.id)
+            .execute()
+        )
 
     if not result.data:
         raise NotFoundError("Creator non trovato.")

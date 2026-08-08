@@ -99,7 +99,9 @@ class ExternalServiceError(PicoxError):
 
 class GeminiError(ExternalServiceError):
     code = "gemini_unavailable"
-    default_message = "L'analisi del video non è al momento disponibile. Riprova tra qualche minuto."
+    default_message = (
+        "L'analisi del video non è al momento disponibile. Riprova tra qualche minuto."
+    )
 
     def __init__(self, message: str | None = None, *, details: Any | None = None) -> None:
         super().__init__(message, service="gemini", details=details)

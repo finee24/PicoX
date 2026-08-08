@@ -109,7 +109,7 @@ class SafeRoute(APIRoute):
                 ValidationError,
             ):
                 raise
-            except Exception as exc:  # noqa: BLE001 — è esattamente il punto
+            except Exception as exc:
                 logger.exception(
                     "Errore non gestito in %s %s", request.method, request.url.path
                 )

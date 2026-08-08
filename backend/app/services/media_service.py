@@ -24,6 +24,7 @@ import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Final
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -86,6 +87,10 @@ _VIDEO_MIME_FALLBACK = "video/mp4"
 
 _MAX_REDIRECTS = 5
 
+# Host del key value store di Apify. È l'unico verso cui il downloader invia una
+# credenziale: vedi `_per_hop_headers`.
+_APIFY_STORAGE_HOST = "api.apify.com"
+
 
 def _is_tracking_param(key: str) -> bool:
     lowered = key.lower()
@@ -140,11 +145,29 @@ class DownloadedVideo:
     duration_seconds: float | None
 
 
+# Content-Type che una CDN video non serve mai per un file vero: se compaiono
+# qui, l'URL non sta restituendo un video ma una pagina di errore, un login
+# wall o un JSON — capita tipicamente quando l'URL "diretto" in realtà punta
+# ancora alla pagina del post (risoluzione dei metadati fallita a monte).
+# Senza questo controllo il contenuto verrebbe comunque incollato come
+# `video/mp4` (fallback più sotto) e mandato a Gemini, che lo rifiuta con un
+# `FileState.FAILED` poco leggibile — 503 uguale, ma senza dire perché.
+_DEFINITELY_NOT_VIDEO: Final = frozenset(
+    {"text/html", "text/plain", "application/json", "application/xml", "text/xml"}
+)
+
+
 def _guess_mime_type(url: str, content_type: str | None) -> str:
     if content_type:
         base = content_type.split(";", 1)[0].strip().lower()
         if base.startswith("video/"):
             return base
+        if base in _DEFINITELY_NOT_VIDEO:
+            raise ExternalServiceError(
+                "La sorgente non ha restituito un video valido. "
+                "Il link potrebbe richiedere l'accesso o non essere più disponibile.",
+                service="media",
+            )
         # Le CDN servono spesso i video come application/octet-stream.
         if base not in {"", "application/octet-stream", "binary/octet-stream"}:
             logger.debug("Content-Type inatteso per un video: %s", base)
@@ -184,7 +207,7 @@ async def probe_duration_seconds(path: str) -> float | None:
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await asyncio.wait_for(process.communicate(), timeout=30)
-    except (OSError, asyncio.TimeoutError):
+    except (TimeoutError, OSError):
         logger.warning("ffprobe non riuscito sul file scaricato.", exc_info=True)
         return None
 
@@ -196,8 +219,29 @@ async def probe_duration_seconds(path: str) -> float | None:
         return None
 
 
-def _enforce_duration(duration: float | None, settings: Settings) -> None:
+def _enforce_duration(
+    duration: float | None, settings: Settings, *, verificabile: bool = True
+) -> None:
+    """Applica il limite di durata.
+
+    Con `verificabile=False` una durata sconosciuta diventa un rifiuto, invece di
+    saltare il controllo. È il comportamento voluto **dopo** il download, quando
+    ogni fonte di durata è stata tentata: se a quel punto non la conosciamo, il
+    limite configurato non è applicabile, e lasciar passare il video vorrebbe
+    dire che `MAX_VIDEO_DURATION_SECONDS` non significa nulla.
+
+    Un `None` silenzioso è esattamente come il limite si era già disattivato una
+    volta: `ffprobe` assente sul runtime Python di Render, `probe_duration_
+    seconds` che restituisce `None`, e nessun segnale da nessuna parte. La
+    configurazione dichiarava un limite che il runtime non applicava.
+    """
     if duration is None:
+        if not verificabile:
+            raise PicoxValidationError(
+                "Non è stato possibile determinare la durata del video, quindi il "
+                "limite configurato non può essere applicato. Il video è stato "
+                "rifiutato per prudenza."
+            )
         return
     if duration > settings.max_video_duration_seconds:
         raise VideoTooLongError(
@@ -228,6 +272,11 @@ async def download_to_temp(
     fallimento della cancellazione viene loggato ma non propagato, per non
     trasformare un'analisi riuscita in un 500.
     """
+    # Pre-controllo con i metadati di Apify, che sono best effort e spessissimo
+    # assenti. Qui `None` deve restare permissivo: renderlo fail-closed
+    # rifiuterebbe ogni video che Apify non è riuscito a descrivere, prima
+    # ancora di scaricarlo. Il controllo che non ammette incertezza è quello
+    # *dopo* il download, dove la durata si può misurare.
     _enforce_duration(known_duration_seconds, settings)
 
     fd, temp_path = tempfile.mkstemp(prefix="picox_", suffix=".mp4")
@@ -239,7 +288,9 @@ async def download_to_temp(
         duration = known_duration_seconds
         if duration is None:
             duration = await probe_duration_seconds(temp_path)
-        _enforce_duration(duration, settings)
+        # Il file è sul disco: ogni fonte di durata è stata tentata. Se è ancora
+        # ignota, si rifiuta invece di ignorare il limite.
+        _enforce_duration(duration, settings, verificabile=False)
 
         yield DownloadedVideo(
             path=temp_path,
@@ -311,7 +362,28 @@ async def _assert_public_target(url: str) -> None:
             )
 
 
-async def _open_validated_stream(client: httpx.AsyncClient, url: str) -> httpx.Response:
+def _per_hop_headers(url: str, settings: Settings) -> dict[str, str]:
+    """Header di autenticazione per *questo* hop, ricalcolati a ogni redirect.
+
+    Con `shouldDownloadVideos: true` gli actor restituiscono un record nel key
+    value store di Apify, che senza credenziale risponde `403`. La credenziale
+    viaggia in header e non in query string: un URL finisce nel messaggio di
+    ogni eccezione httpx, nei log dei proxy intermedi e nel `Referer`, mentre un
+    header no.
+
+    Il calcolo è per hop, non una volta sola, proprio perché un redirect può
+    portare su un host diverso: lì il token non deve seguire. È il motivo per
+    cui questi header non stanno sul client httpx, che li applicherebbe a
+    tutte le richieste della sessione.
+    """
+    if urlsplit(url).hostname != _APIFY_STORAGE_HOST:
+        return {}
+    return {"Authorization": f"Bearer {settings.apify_api_token.get_secret_value()}"}
+
+
+async def _open_validated_stream(
+    client: httpx.AsyncClient, url: str, settings: Settings
+) -> httpx.Response:
     """Apre lo stream seguendo i redirect **uno alla volta**, validandoli tutti.
 
     `follow_redirects=True` di httpx salterebbe il controllo su ogni hop
@@ -322,7 +394,10 @@ async def _open_validated_stream(client: httpx.AsyncClient, url: str) -> httpx.R
     for _ in range(_MAX_REDIRECTS + 1):
         await _assert_public_target(current)
 
-        response = await client.send(client.build_request("GET", current), stream=True)
+        response = await client.send(
+            client.build_request("GET", current, headers=_per_hop_headers(current, settings)),
+            stream=True,
+        )
 
         if response.is_redirect and response.next_request is not None:
             next_url = str(response.next_request.url)
@@ -354,7 +429,7 @@ async def _stream_to_file(url: str, dest_path: str, settings: Settings) -> Downl
             timeout=httpx.Timeout(settings.download_timeout_seconds, connect=15.0),
             headers={"User-Agent": "PicoxBot/1.0"},
         ) as client:
-            response = await _open_validated_stream(client, url)
+            response = await _open_validated_stream(client, url, settings)
             try:
                 # Se la CDN dichiara la dimensione, si rifiuta prima di scaricare.
                 declared = response.headers.get("content-length")
@@ -365,7 +440,12 @@ async def _stream_to_file(url: str, dest_path: str, settings: Settings) -> Downl
                     str(response.url), response.headers.get("content-type")
                 )
 
-                with open(dest_path, "wb") as handle:
+                # La scrittura bloccante in funzione async (ASYNC230) è una
+                # scelta: ogni `write` è di 256 KB verso la page cache, decine
+                # di microsecondi, mentre l'attesa vera è sul chunk successivo
+                # dalla rete. Spostarla in un threadpool aggiungerebbe un hop
+                # per chunk — stesso costo, più complessità, nessun guadagno.
+                with open(dest_path, "wb") as handle:  # noqa: ASYNC230
                     async for chunk in response.aiter_bytes(chunk_size=1024 * 256):
                         written += len(chunk)
                         if written > max_bytes:
@@ -379,15 +459,20 @@ async def _stream_to_file(url: str, dest_path: str, settings: Settings) -> Downl
                 await response.aclose()
 
     except httpx.HTTPStatusError as exc:
+        # Niente `exc_info`: il messaggio di `HTTPStatusError` contiene l'URL
+        # completo, e un URL di download può portare con sé una credenziale in
+        # query string. Lo status da solo dice già tutto quel che serve per
+        # diagnosticare, e il traceback non aggiungerebbe nulla di azionabile.
         logger.warning(
-            "Download del video fallito: status %s", exc.response.status_code, exc_info=True
+            "Download del video fallito: status %s", exc.response.status_code
         )
         raise ExternalServiceError(
             "Impossibile scaricare il video: la sorgente non è raggiungibile.",
             service="media",
         ) from exc
     except httpx.HTTPError as exc:
-        logger.warning("Download del video fallito: %s", type(exc).__name__, exc_info=True)
+        # Stessa ragione: `str(exc)` di molte eccezioni httpx include l'URL.
+        logger.warning("Download del video fallito: %s", type(exc).__name__)
         raise ExternalServiceError(
             "Impossibile scaricare il video: la sorgente non è raggiungibile.",
             service="media",

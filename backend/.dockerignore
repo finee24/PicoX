@@ -11,6 +11,11 @@ __pycache__/
 .env.*
 !.env.example
 
+# Stesso motivo per cui stanno in .gitignore: a livello DEBUG le librerie HTTP/2
+# stampano ogni header, `apikey` compresa. Un log nel contesto di build finisce
+# in un layer dell'immagine, da cui non si cancella.
+*.log
+
 .git/
 .gitignore
 README.md

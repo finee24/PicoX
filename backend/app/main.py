@@ -13,27 +13,19 @@ from pydantic import BaseModel, Field
 
 from app.api.v1 import analyze, creators, cron, insights
 from app.core.config import get_settings
+from app.core.observability import configure_logging
 from app.middleware.error_handler import register_exception_handlers
+from app.middleware.request_context import RequestContextMiddleware
 from app.services.supabase_service import close_service_client
 
 logger = logging.getLogger(__name__)
 
 
-def _configure_logging(level: str) -> None:
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
-    )
-    # httpx logga ogni richiesta con l'URL completo: verso Supabase e Gemini
-    # quell'URL può contenere parametri che non vogliamo nei log.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-
-
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
-    _configure_logging(settings.log_level)
+    # JSON in produzione, riga leggibile in sviluppo: vedi `core.observability`.
+    configure_logging(settings.log_level, json_output=settings.is_production)
     logger.info(
         "Picox API avviata (environment=%s, modello=%s)",
         settings.environment,
@@ -79,6 +71,12 @@ def create_app() -> FastAPI:
         allow_headers=["Authorization", "Content-Type"],
         max_age=600,
     )
+
+    # Aggiunto per ultimo = strato più esterno (Starlette costruisce lo stack al
+    # contrario). Serve così: anche una preflight CORS respinta o un errore
+    # sollevato dentro un altro middleware finisce nell'access log con un
+    # request_id assegnato.
+    app.add_middleware(RequestContextMiddleware)
 
     register_exception_handlers(app)
 

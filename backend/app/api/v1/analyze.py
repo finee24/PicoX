@@ -20,7 +20,7 @@ background senza un JWT di sessione.
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Any
+from typing import Annotated, Any, Final
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Response, status
@@ -45,18 +45,52 @@ router = APIRouter(prefix="/api/v1", tags=["analysis"], route_class=SafeRoute)
 # =============================================================================
 
 
+# Colonne che ciascuna modalità si impegna a valorizzare. Servono a decidere se
+# una riga già in archivio *copre* la richiesta: `UNIQUE (user_id, video_url)`
+# ammette una sola riga per video, quindi senza questo controllo un'analisi
+# `INFO` fatta ieri soddisfaceva anche una richiesta `BOTH` di oggi, restituendo
+# 200 con `style_data` e `inverse_script_template` a `null`.
+_COLONNE_PER_MODALITA: Final[dict[str, tuple[str, ...]]] = {
+    "INFO": ("summary_data",),
+    "STYLE": ("style_data",),
+    "BOTH": ("summary_data", "style_data", "inverse_script_template"),
+}
+
+
+def _copre_la_modalita(record: InsightResponse, mode: AnalysisMode) -> bool:
+    """`True` se la riga contiene già tutto ciò che `mode` promette.
+
+    Il confronto è per *copertura*, non per uguaglianza: una riga `BOTH`
+    soddisfa una richiesta `INFO`, e restituirla è corretto oltre che gratuito.
+    L'uguaglianza secca sarebbe peggio del bug che corregge — una richiesta
+    `INFO` su una riga `BOTH` verrebbe considerata cache miss, e l'upsert
+    successivo sovrascriverebbe la riga degradandola, buttando via lo stile e lo
+    script inverso già pagati.
+    """
+    return all(
+        getattr(record, colonna) is not None
+        for colonna in _COLONNE_PER_MODALITA[mode]
+    )
+
+
 async def find_cached_insight(
     user_id: str,
     video_url: str,
     *,
     access_token: str | None,
     settings: Settings,
+    required_mode: AnalysisMode | None = None,
 ) -> InsightResponse | None:
     """Cerca un insight già presente per `(user_id, video_url)`.
 
     Con un JWT disponibile si usa il client scoped, così il RLS resta la rete di
     sicurezza sulla lettura. Il job cron non ha una sessione utente e ricade sul
     client service-role, che qui è comunque filtrato su `user_id`.
+
+    Con `required_mode` la riga vale come cache hit solo se copre quella
+    modalità; altrimenti si restituisce `None` e il chiamante rianalizza. Senza,
+    la riga viene restituita così com'è — è il caso della rilettura dopo
+    l'upsert, dove il record è per definizione quello appena scritto.
     """
     async with db_errors("cache lookup insights"):
         if access_token is not None:
@@ -77,7 +111,16 @@ async def find_cached_insight(
 
     if not result.data:
         return None
-    return InsightResponse.model_validate(result.data[0])
+
+    record = InsightResponse.model_validate(result.data[0])
+    if required_mode is not None and not _copre_la_modalita(record, required_mode):
+        logger.info(
+            "Riga in cache insufficiente per la modalità %s (archiviata: %s): si rianalizza.",
+            required_mode,
+            record.analysis_mode,
+        )
+        return None
+    return record
 
 
 # =============================================================================
@@ -143,7 +186,11 @@ async def perform_analysis(
     chiamata ad Apify per lo stesso video.
     """
     cached = await find_cached_insight(
-        user_id, video_url, access_token=access_token, settings=settings
+        user_id,
+        video_url,
+        access_token=access_token,
+        settings=settings,
+        required_mode=mode,
     )
     if cached is not None:
         logger.info("Cache hit su insights per l'utente %s", user_id)

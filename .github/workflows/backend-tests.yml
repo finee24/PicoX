@@ -1,0 +1,126 @@
+name: Backend — test e scansione segreti
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+# Un push che ne supera un altro sullo stesso branch annulla la run precedente:
+# nessuno aspetta l'esito di un commit già sostituito.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ===========================================================================
+  # Segreti — gira su OGNI push, senza filtri di path
+  # ===========================================================================
+  # Volutamente non filtrato su `backend/**`: il rischio maggiore è una chiave
+  # che finisce nel **frontend**, dove viene servita al browser. Un filtro che
+  # escludesse `frontend/` renderebbe questo job cieco proprio dove serve.
+  secret-scan:
+    name: Scansione segreti
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cerca credenziali nei file tracciati
+        run: bash .github/scripts/scan-secrets.sh
+
+  # ===========================================================================
+  # Test del backend
+  # ===========================================================================
+  backend-tests:
+    name: Lint, type check e test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Installa le dipendenze
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      # Lint e type check girano PRIMA dei test e non sono `continue-on-error`:
+      # un check che non può far fallire la build è documentazione, non un
+      # controllo. Le regole sono in `backend/pyproject.toml`, le stesse che
+      # usano gli hook locali — così un lint verde in locale resta verde qui.
+      - name: Ruff
+        run: ruff check .
+
+      - name: Mypy
+        run: mypy
+
+      # La suite non tocca la rete: Supabase è sostituito da un doppio in
+      # memoria, Gemini e Apify da stub, il download del media da un fake
+      # `autouse`. Le variabili d'ambiente le imposta `tests/conftest.py`,
+      # quindi qui non serve alcun secret del repository — ed è un bene: un
+      # test che richiede credenziali vere non gira sulle pull request dai fork.
+      - name: Pytest
+        run: pytest -v
+
+  # ===========================================================================
+  # Frontend — build e lint
+  # ===========================================================================
+  # Non richiesto dal task, ma senza di questo un errore di tipo nel frontend
+  # si scopre solo al deploy su Vercel: `next build` esegue anche il type check
+  # di TypeScript.
+  frontend-build:
+    name: Build del frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # La versione di Node si legge da `frontend/.nvmrc`, non da un numero
+      # scritto qui. Quando le due fonti erano separate hanno divergito: il
+      # lockfile veniva rigenerato in locale con Node 24 (npm 11) mentre la CI
+      # girava su Node 22 (npm 10), e le due major di npm registrano
+      # diversamente le dipendenze opzionali transitive — `npm ci` si fermava
+      # con EUSAGE su `@emnapi/core` e `@emnapi/runtime`.
+      #
+      # Con `node-version-file` esiste un solo numero, e lo leggono sia questo
+      # workflow sia i version manager di chi sviluppa. `engines.node` in
+      # `package.json` lo rende verificabile anche fuori di qui.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Installa le dipendenze
+        run: npm ci
+
+      - name: ESLint
+        run: npm run lint
+
+      # `lib/env.ts` fa fallire il modulo se una NEXT_PUBLIC_* manca, e `next
+      # build` prerende le pagine: senza questi valori il build si interrompe.
+      # Sono segnaposto sintattici, non credenziali — il build non contatta
+      # nessun servizio.
+      - name: Build
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: https://esempio.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: chiave-anon-fittizia-per-il-build
+          NEXT_PUBLIC_BACKEND_URL: http://localhost:8000
+        run: npm run build

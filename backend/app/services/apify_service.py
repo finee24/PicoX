@@ -17,6 +17,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
+from urllib.parse import urlsplit
 
 from apify_client import ApifyClientAsync
 from apify_client.errors import ApifyApiError, ApifyClientError
@@ -28,6 +29,7 @@ from app.services.media_service import normalize_video_url
 logger = logging.getLogger(__name__)
 
 _RATE_LIMIT_STATUS: Final = 429
+_APIFY_STORAGE_HOST: Final = "api.apify.com"
 _RETRYABLE_STATUS: Final = frozenset({429, 500, 502, 503, 504})
 
 # Chiavi candidate per ciascun campo, in ordine di preferenza. Gli actor
@@ -131,9 +133,15 @@ def _normalize_item(item: dict[str, Any]) -> ScrapedVideo | None:
         logger.debug("Item con URL non normalizzabile, scartato.")
         return None
 
+    # L'URL resta pulito: se punta al key value store di Apify, la credenziale
+    # la aggiunge il downloader in header, per hop — vedi
+    # `media_service._per_hop_headers`. In query string finirebbe nel messaggio
+    # di ogni eccezione httpx, e da lì nei log.
+    download_url = _first_str(item, _DOWNLOAD_KEYS) or _first_str(meta, _DOWNLOAD_KEYS)
+
     return ScrapedVideo(
         video_url=video_url,
-        download_url=_first_str(item, _DOWNLOAD_KEYS) or _first_str(meta, _DOWNLOAD_KEYS),
+        download_url=download_url,
         thumbnail_url=_first_str(item, _THUMBNAIL_KEYS) or _first_str(meta, _THUMBNAIL_KEYS),
         duration_seconds=_first_float(item, _DURATION_KEYS) or _first_float(meta, _DURATION_KEYS),
         caption=_first_str(item, _CAPTION_KEYS),
@@ -227,7 +235,9 @@ class ApifyService:
         )
         return videos
 
-    async def resolve_video(self, video_url: str, platform: str | None = None) -> ScrapedVideo | None:
+    async def resolve_video(
+        self, video_url: str, platform: str | None = None
+    ) -> ScrapedVideo | None:
         """Metadati e URL diretto di un singolo video, se ricavabili.
 
         Best effort: serve a ottenere `download_url`, `thumbnail_url` e la durata
@@ -256,7 +266,16 @@ class ApifyService:
             case "instagram":
                 return {"directUrls": [video_url], "resultsType": "posts", "resultsLimit": 1}
             case "tiktok":
-                return {"postURLs": [video_url], "resultsPerPage": 1}
+                # Senza questo flag l'actor non restituisce alcun URL scaricabile
+                # (né a livello di item né in `videoMeta`): solo `webVideoUrl`,
+                # cioè la pagina HTML del post. Verificato chiamando l'actor
+                # direttamente — vedi commento su `_authenticate_apify_storage_url`
+                # per cosa succede a valle di questo URL una volta ottenuto.
+                return {
+                    "postURLs": [video_url],
+                    "resultsPerPage": 1,
+                    "shouldDownloadVideos": True,
+                }
             case "youtube_shorts":
                 return {"startUrls": [{"url": video_url}], "maxResults": 1}
             case _:
@@ -266,7 +285,12 @@ class ApifyService:
 
     async def _run_actor(
         self, actor_id: str, run_input: dict[str, Any], limit: int
-    ) -> list[dict[str, Any]]:
+    ) -> list[Any]:
+        # `list[Any]` e non `list[dict]`: un dataset Apify contiene JSON
+        # arbitrario e nulla garantisce che ogni item sia un oggetto. Dichiararlo
+        # come lista di dict renderebbe *morti* i controlli `isinstance` dei
+        # chiamanti — che invece sono l'unica cosa che li protegge da un actor
+        # che cambia formato fra una release e l'altra.
         """Esegue l'actor con un singolo retry sugli errori transitori."""
         last_error: Exception | None = None
 
@@ -310,23 +334,51 @@ class ApifyService:
             except ApifyError:
                 raise
 
-            except Exception as exc:  # noqa: BLE001 — timeout, rete, parsing
+            except Exception as exc:
                 logger.error("Apify: fallimento inatteso su %s", actor_id, exc_info=True)
                 raise ApifyError() from exc
 
         raise ApifyError() from last_error
 
 
+# Allowlist di host esatti. Il confronto è sull'hostname e non su una
+# sottostringa dell'URL intero: `https://evil.example/instagram.mp4` contiene
+# "instagram." e con il vecchio controllo veniva classificato come Instagram,
+# quindi mandato all'actor Instagram con un URL di terzi. Stessa cosa per un
+# host come `instagram.com.evil.example`, che a un `in` sembra legittimo.
+#
+# I sottodomini sono elencati invece di essere accettati con un suffisso: un
+# match per suffisso su `.tiktok.com` andrebbe bene, ma su `tiktok.com` senza
+# punto iniziale riaprirebbe esattamente il buco che questa allowlist chiude.
+_PLATFORM_HOSTS: Final[dict[str, str]] = {
+    "instagram.com": "instagram",
+    "www.instagram.com": "instagram",
+    "m.instagram.com": "instagram",
+    "tiktok.com": "tiktok",
+    "www.tiktok.com": "tiktok",
+    "m.tiktok.com": "tiktok",
+    "vm.tiktok.com": "tiktok",
+    "vt.tiktok.com": "tiktok",
+    "youtube.com": "youtube_shorts",
+    "www.youtube.com": "youtube_shorts",
+    "m.youtube.com": "youtube_shorts",
+    "youtu.be": "youtube_shorts",
+}
+
+
 def detect_platform(video_url: str) -> str | None:
-    """Piattaforma dedotta dall'URL, `None` se non riconosciuta."""
-    url = video_url.lower()
-    if "instagram." in url:
-        return "instagram"
-    if "tiktok." in url:
-        return "tiktok"
-    if "youtube." in url or "youtu.be" in url:
-        return "youtube_shorts"
-    return None
+    """Piattaforma dedotta dall'host dell'URL, `None` se non riconosciuta.
+
+    `None` non è un errore: il chiamante ricade sul download diretto dell'URL,
+    che resta comunque protetto dai controlli di `media_service`. Serve però a
+    non spedire l'URL di un terzo all'actor sbagliato.
+    """
+    host = urlsplit(video_url.strip()).hostname
+    if not host:
+        return None
+    # Il punto finale di un FQDN (`instagram.com.`) risolve in DNS come l'host
+    # senza: senza `rstrip` sarebbe un modo banale di mancare l'allowlist.
+    return _PLATFORM_HOSTS.get(host.lower().rstrip("."))
 
 
 _apify_service: ApifyService | None = None

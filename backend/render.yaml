@@ -1,0 +1,130 @@
+# =============================================================================
+# Picox backend — Render Blueprint
+# =============================================================================
+# Uso: Render Dashboard -> New -> Blueprint -> punta a questo repository.
+# Render legge `render.yaml` dalla radice del repo, quindi se il file resta qui
+# in `backend/` va indicato esplicitamente come Blueprint path, oppure va
+# copiato/symlinkato in radice. `rootDir` sotto fa il resto: build ed esecuzione
+# avvengono dentro `backend/`.
+#
+# PERCHÉ DOCKER E NON IL RUNTIME PYTHON NATIVO.
+#
+# Il runtime Python di Render non include ffmpeg, quindi `ffprobe` non esiste e
+# `probe_duration_seconds` restituisce sempre `None`. Con il vecchio
+# `_enforce_duration`, che su `None` non faceva nulla, il risultato era che
+# `MAX_VIDEO_DURATION_SECONDS` — impostata qui sotto e documentata nel README —
+# non veniva applicata da nessuna parte: una configurazione che dichiarava un
+# limite inesistente, senza un log a segnalarlo.
+#
+# Il `Dockerfile` in questa cartella installa ffmpeg, quindi qui il limite di
+# durata è applicato davvero. Il limite di **dimensione** era ed è applicato in
+# entrambi i runtime, durante lo streaming.
+#
+# `_enforce_duration` è ora anche fail-closed dopo il download: se la durata
+# resta ignota il video viene rifiutato, invece di passare senza controllo. Le
+# due difese sono complementari — questa immagine fa sì che il caso non si
+# presenti, il fail-closed fa sì che se si presentasse non passerebbe in
+# silenzio.
+
+services:
+  - type: web
+    name: picox-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter          # `free` va in sleep dopo 15 minuti di inattività
+    region: frankfurt      # vicino al progetto Supabase e agli utenti
+    rootDir: backend
+    branch: main
+
+    # Nessun `buildCommand`: il Dockerfile fa già `pip install`.
+    # Nessun `startCommand`: il CMD del Dockerfile espande già `$PORT`.
+
+    # `/health` non tocca database né servizi esterni: risponde finché il
+    # processo è vivo, che è esattamente ciò che una liveness probe deve dire.
+    healthCheckPath: /health
+
+    autoDeploy: true
+
+    envVars:
+      # --- Ambiente ------------------------------------------------------
+      # `production` disattiva /docs, /redoc e /openapi.json e attiva il
+      # logging JSON su una riga per record.
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: PYTHON_VERSION
+        value: "3.11"
+
+      # --- Supabase ------------------------------------------------------
+      # `sync: false` = Render chiede il valore al primo deploy e lo conserva
+      # cifrato. Nessun segreto entra in questo file, che è versionato.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      # BYPASSA IL ROW LEVEL SECURITY. Solo qui, mai nel frontend.
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+
+      # SUPABASE_JWT_SECRET NON è dichiarata di proposito.
+      # Questo progetto firma i JWT in ES256 e le chiavi pubbliche si leggono
+      # da JWKS. Dichiararla qui e lasciarla vuota non equivale a ometterla:
+      # pydantic-settings leggerebbe una stringa vuota (non `None`), il backend
+      # sceglierebbe la verifica HS256 e *ogni* richiesta autenticata
+      # risponderebbe 401. Va aggiunta solo su un progetto con JWT secret
+      # legacy, e in quel caso con un valore vero.
+
+      # --- Servizi esterni -----------------------------------------------
+      - key: GEMINI_API_KEY
+        sync: false
+      # Alias mantenuto da Google sul modello flash correntemente consigliato:
+      # evita che un ritiro del modello fermi le analisi in produzione.
+      - key: GEMINI_MODEL
+        value: gemini-flash-latest
+      # Timeout applicativo dell'inferenza, in secondi. Dichiararlo qui lo rende
+      # regolabile da dashboard senza ridistribuire il codice: se le analisi
+      # cominciano a scadere è il primo valore da alzare.
+      - key: GEMINI_TIMEOUT_SECONDS
+        value: "300"
+      - key: APIFY_API_TOKEN
+        sync: false
+
+      # --- Autenticazione dello scheduler --------------------------------
+      # Generata da Render, non scelta a mano: è il segreto dell'header
+      # X-CRON-SECRET. Va poi copiata nel secret dello scheduler
+      # (vedi app/cron_config.md).
+      - key: CRON_SECRET
+        generateValue: true
+
+      # --- URL -----------------------------------------------------------
+      # Unico origin ammesso dal CORS: senza slash finale e senza path, o il
+      # browser non riconoscerà l'origin come consentito.
+      - key: FRONTEND_URL
+        sync: false
+      - key: BACKEND_URL
+        sync: false
+
+      # --- Limiti di ingestione ------------------------------------------
+      - key: MAX_VIDEO_MB
+        value: "200"
+      - key: MAX_VIDEO_DURATION_SECONDS
+        value: "600"
+      # Le analisi sono costose (download + inferenza): su un piano piccolo
+      # più di 2 in parallelo saturano memoria e quota Gemini.
+      - key: CRON_MAX_CONCURRENT_ANALYSES
+        value: "2"
+
+# -----------------------------------------------------------------------------
+# Variante runtime Python nativo — NON usarla senza aver riletto la nota in
+# testa a questo file. Build più veloci, ma niente ffmpeg: con il fail-closed
+# introdotto in `_enforce_duration` ogni video la cui durata non arriva dai
+# metadati Apify verrebbe **rifiutato**, non semplicemente non verificato.
+#
+#   runtime: python
+#   buildCommand: pip install -r requirements.txt
+#   startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers
+#
+# Va accompagnata da un modo alternativo di ottenere `ffprobe` sul PATH.
+# -----------------------------------------------------------------------------

@@ -95,7 +95,20 @@ class GeminiService:
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
         self._client = genai.Client(
-            api_key=self._settings.gemini_api_key.get_secret_value()
+            api_key=self._settings.gemini_api_key.get_secret_value(),
+            # Senza questo, `gemini_timeout_seconds` era una promessa che nessuno
+            # manteneva: la variabile esisteva in configurazione e non veniva
+            # letta da nessuna parte. Una `generate_content` che non risponde
+            # tiene occupati la richiesta e il worker uvicorn a tempo
+            # indefinito — e su un'inferenza multimodale non è un caso di
+            # scuola.
+            #
+            # `HttpOptions.timeout` è in **millisecondi**, mentre la nostra
+            # configurazione è in secondi: la conversione è il motivo per cui
+            # questa riga non è un semplice passaggio di parametro.
+            http_options=types.HttpOptions(
+                timeout=self._settings.gemini_timeout_seconds * 1000
+            ),
         )
 
     async def analyze_video(
@@ -126,7 +139,7 @@ class GeminiService:
         except genai_errors.APIError as exc:
             logger.error("Gemini: upload del file fallito (status=%s)", exc.code, exc_info=True)
             raise GeminiError() from exc
-        except Exception as exc:  # noqa: BLE001 — rete, I/O locale
+        except Exception as exc:
             logger.error("Gemini: upload del file fallito.", exc_info=True)
             raise GeminiError() from exc
 
@@ -158,7 +171,7 @@ class GeminiService:
             await asyncio.sleep(_FILE_POLL_INTERVAL_SECONDS)
             try:
                 current = await self._client.aio.files.get(name=uploaded.name)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 await self._delete_remote_file(uploaded.name)
                 logger.error("Gemini: polling dello stato del file fallito.", exc_info=True)
                 raise GeminiError() from exc
@@ -206,7 +219,7 @@ class GeminiService:
                     exc_info=True,
                 )
                 raise GeminiError() from exc
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.error(
                     "Gemini: generate_content fallito (tentativo %s).", attempt, exc_info=True
                 )
@@ -274,7 +287,7 @@ class GeminiService:
             return
         try:
             await self._client.aio.files.delete(name=name)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning("Gemini: impossibile cancellare il file remoto.", exc_info=True)
 
 

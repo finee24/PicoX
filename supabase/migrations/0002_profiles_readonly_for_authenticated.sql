@@ -1,0 +1,75 @@
+-- =============================================================================
+-- 0002 — `profiles` diventa in sola lettura per il ruolo `authenticated`
+-- =============================================================================
+--
+-- PERCHÉ
+--
+-- La 0001 concede `select, insert, update, delete` su tutte e tre le tabelle a
+-- `authenticated`, contando sulle policy RLS per il filtro. Le policy filtrano
+-- però le *righe*, non le *colonne*: in PostgreSQL la granularità per colonna
+-- esiste solo nei GRANT. Un utente autenticato, con la chiave pubblica che sta
+-- già nel bundle del browser e il proprio JWT, poteva quindi chiamare PostgREST
+-- direttamente:
+--
+--     PATCH /rest/v1/profiles?id=eq.<il proprio uuid>
+--     {"subscription_tier": "pro"}
+--
+-- e la richiesta passava sia `USING` sia `WITH CHECK`, perché la riga *è* sua.
+-- Stesso discorso per `email`, riscrivibile a piacere.
+--
+-- Oggi la colonna è inerte: nessun percorso applicativo legge
+-- `subscription_tier` (verificato su tutto `backend/app/`). Il problema è che la
+-- 0001 è già applicata in produzione, quindi il primo commit che introdurrà i
+-- limiti di piano troverebbe il paywall già aggirabile — senza che nessuno
+-- abbia toccato una riga di SQL, e senza alcun segnale che qualcosa non va.
+--
+-- COSA CAMBIA
+--
+-- `authenticated` conserva solo `select`. Nessun percorso applicativo ne
+-- risente, ed è stato verificato prima di scrivere questa migration:
+--
+--   * la riga viene creata dal trigger `on_auth_user_created`, che è
+--     `SECURITY DEFINER` e gira con i privilegi di `postgres`;
+--   * il backend non scrive mai su `profiles` — nessuna occorrenza in
+--     `backend/app/`; se un giorno servisse, userebbe il client service-role,
+--     che ha `grant all` dalla 0001 e non è toccato da qui;
+--   * il frontend non nomina `profiles` da nessuna parte.
+--
+-- Se in futuro servisse una scrittura dal client, va concessa per colonna e non
+-- sulla tabella intera:
+--
+--     grant update (email) on public.profiles to authenticated;
+--
+-- Le policy RLS della 0001 restano invariate: continuano a filtrare le righe.
+-- Questa migration toglie un permesso che nessuno usa, quindi è additiva e non
+-- distruttiva — non tocca dati.
+
+revoke insert, update, delete on public.profiles from authenticated;
+
+
+-- =============================================================================
+-- E già che ci siamo: TRUNCATE non è filtrato dal RLS
+-- =============================================================================
+--
+-- Interrogando `information_schema.role_table_grants` sul progetto reale è
+-- emerso che `authenticated` possiede anche `TRUNCATE`, `REFERENCES` e
+-- `TRIGGER` su tutte e tre le tabelle. Non arrivano dalla 0001, che concede
+-- esplicitamente solo `select, insert, update, delete`: sono le default
+-- privileges del template Supabase, che la 0001 dichiarava di voler scavalcare
+-- ma che in pratica si sommano ai suoi GRANT invece di sostituirli.
+--
+-- `TRUNCATE` è l'unico dei tre con un peso reale, e ne ha parecchio:
+-- **il Row Level Security non si applica a TRUNCATE.** Una policy
+-- `user_id = auth.uid()` non filtra nulla — l'istruzione svuota la tabella
+-- intera, di tutti i tenant.
+--
+-- Non è raggiungibile da PostgREST, che espone solo SELECT/INSERT/UPDATE/DELETE
+-- e le funzioni RPC: oggi non è sfruttabile dall'esterno. È però un privilegio
+-- distruttivo, esente da RLS, in mano al ruolo di ogni utente loggato, che
+-- nessun percorso applicativo usa. La prima funzione `SECURITY INVOKER` esposta
+-- come RPC che dovesse contenere un TRUNCATE lo renderebbe raggiungibile.
+--
+-- `REFERENCES` e `TRIGGER` restano: sono inerti e toglierli non aggiunge nulla.
+
+revoke truncate on public.profiles, public.creators, public.insights
+  from authenticated;

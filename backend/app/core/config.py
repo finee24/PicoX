@@ -109,4 +109,6 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Istanza singleton delle impostazioni (usata anche come dependency FastAPI)."""
-    return Settings()  # type: ignore[call-arg]  # i campi arrivano dall'ambiente
+    # Nessun `type: ignore` necessario: il plugin mypy di pydantic sa che i
+    # campi senza default arrivano dall'ambiente e non dal costruttore.
+    return Settings()

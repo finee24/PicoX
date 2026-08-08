@@ -140,7 +140,7 @@ async def _run_job(
             exc.code,
             exc.message,
         )
-    except Exception:  # noqa: BLE001 — nessun errore deve uccidere il worker
+    except Exception:
         logger.exception("Cron: analisi fallita in modo imprevisto per %s", job.video_url)
 
 
@@ -218,7 +218,7 @@ async def check_updates(
                 )
             )
             continue
-        except Exception:  # noqa: BLE001 — un creator non deve abortire il giro
+        except Exception:
             logger.exception("Cron: errore imprevisto su %s/%s", platform, username)
             results.append(
                 CronCreatorResult(

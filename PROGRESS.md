@@ -602,6 +602,107 @@ Nota minore, senza impatto: fra i blob irraggiungibili c'è una chiave
 progettazione — è la chiave che sta nel bundle del browser — ed è comunque in un
 oggetto che nessun ref raggiunge.
 
+### ⚠️ MINORE — un 500 fuori da `SafeRoute` non porta gli header CORS
+
+Emerso dall'audit di readiness, sezione 5, il **10 agosto 2026**. Non è un leak:
+la risposta è sanificata in entrambi i casi. È un problema di *leggibilità* per
+il client.
+
+**Perché.** Lo stack dei middleware, dall'esterno verso l'interno, è
+`ServerErrorMiddleware → RequestContextMiddleware → CORSMiddleware →
+ExceptionMiddleware → router`. Le due reti di sicurezza stanno quindi ad altezze
+diverse:
+
+* un'eccezione dentro un router con `route_class=SafeRoute` viene convertita in
+  `PicoxError` e gestita da `ExceptionMiddleware`, che sta **dentro** al CORS →
+  la risposta esce con `Access-Control-Allow-Origin`;
+* un'eccezione in un endpoint **senza** `SafeRoute` arriva fino a
+  `ServerErrorMiddleware`, che sta **fuori** dal CORS → stessa identica risposta
+  JSON, ma **senza** header CORS.
+
+Misurato con origin ammesso (`http://localhost:3000`):
+
+| Endpoint | Risposta | Header CORS |
+|---|---|---|
+| con `SafeRoute` | `500 internal_error` | `access-control-allow-origin` presente |
+| senza `SafeRoute` | `500 internal_error` (byte identici) | **assente** |
+
+**Conseguenza pratica.** Un browser non può leggere quel 500: vede un errore
+CORS e il frontend mostra "errore di rete" invece dell'envelope. Il caso non è
+teorico — `/health` in `main.py` è già registrato così, direttamente sull'app.
+
+**Non è urgente** perché non espone nulla, e perché tutti i router applicativi
+usano `SafeRoute`. Va però tenuto presente quando si aggiunge un endpoint: la
+convenzione `route_class=SafeRoute` non serve solo a sanificare (quello lo fa
+comunque la rete esterna), serve a far arrivare l'errore al browser.
+
+Nota minore collegata: il rifiuto di una preflight CORS da origin non ammesso
+risponde `400 text/plain "Disallowed CORS origin"`, generato da Starlette e
+quindi fuori dall'envelope `{"error": {...}}` usato ovunque altrove. Nessun
+dettaglio interno, solo un formato incoerente.
+
+### ✅ VERIFICATO — nessun leak di informazioni negli errori (audit sezione 5)
+
+Eseguito il **10 agosto 2026** contro il backend vivo con `ENVIRONMENT=production`,
+non leggendo il codice: **28 scenari** più i fallimenti reali dei servizi
+esterni, ognuno con la risposta HTTP ispezionata byte per byte.
+
+**Parte A — nessun leak, in nessuno scenario.** Zero occorrenze di stack trace,
+path interni, SQLSTATE, nomi di tabella, frammenti SQL, URL o credenziali.
+Verificato con una stringa-esca piantata dentro il messaggio delle eccezioni
+(DSN con password, path sorgente, token): compare **8 volte nei log e 0 volte
+nelle risposte**.
+
+| Scenario | Risposta | Esito |
+|---|---|---|
+| `TypeError` / `AttributeError` non gestiti | `500 internal_error`, 86 byte | pulito |
+| Eccezione con credenziali nel messaggio | `500 internal_error`, 86 byte | pulito |
+| Errore di rete reale (URL interno nel messaggio) | `500 internal_error` | pulito |
+| Validazione Pydantic (5 varianti) | `422 validation_error` + `field`/`message`/`type` | pulito |
+| Violazione `UNIQUE` su `creators` | `409 conflict` | pulito |
+| PostgREST su tabella inesistente | `503 database_unavailable` | pulito |
+| Gemini con chiave non valida (chiamata reale) | `503 gemini_unavailable` | pulito |
+| Apify con token non valido (chiamata reale) | `503 external_service_error` | pulito |
+| 401 (assente / malformato / firma errata) | `401 unauthorized` | pulito |
+| Cron senza segreto e con segreto errato | `401 unauthorized` | pulito |
+| `405`, rotta inesistente, `/docs`, `/openapi.json` | `405` / `404` | pulito |
+
+Il 422 espone `field`, `message` e `type` di Pydantic: sono i nomi dei campi
+**del contratto pubblico**, non della struttura interna, e `_validation_details`
+scarta di proposito `input` e `ctx`, che rimanderebbero indietro il valore
+inviato. Corretto così: senza il nome del campo l'errore sarebbe inutilizzabile.
+
+**404 su risorsa altrui vs inesistente: indistinguibili.** Stesso status, corpo
+**identico byte per byte**, header identici, e nessun canale temporale — mediane
+su 8 ripetizioni: `PATCH` 190,1 ms vs 191,5 ms (Δ 1,5 ms), `DELETE` 192,7 ms vs
+187,9 ms (Δ 4,8 ms). Non è possibile enumerare risorse altrui per differenza di
+risposta.
+
+**Separazione log / risposta, provata caso per caso.** Nei log ci sono 38
+traceback completi, i nomi delle funzioni sorgente e il nome della tabella
+rifiutata dal database; nelle risposte, nessuno di questi frammenti. In più:
+**zero occorrenze** dei segreti reali (`SUPABASE_SERVICE_ROLE_KEY`,
+`SUPABASE_ANON_KEY`, `GEMINI_API_KEY`, `APIFY_API_TOKEN`, `CRON_SECRET`) nei
+125 KB di log prodotti — regressione del fix hpack/Apify del 9 agosto, ancora
+tenuta. Log JSON strutturato con `request_id` per correlare le due sponde.
+
+**Parte B — la garanzia strutturale esiste, ed è a due strati.** Verificata
+attivamente, non letta: un endpoint registrato **senza** `SafeRoute` — cioè
+scritto come lo scriverebbe chi non conosce la convenzione — risponde comunque
+`500 internal_error` sanificato, byte per byte identico a quello protetto.
+`@app.exception_handler(Exception)` (`error_handler.py:168`) finisce in
+`ServerErrorMiddleware`, che è il livello più esterno dello stack: **nessun
+endpoint futuro può bypassarlo**, perché non c'è nulla sopra di lui. La
+protezione è per costruzione, non per disciplina. Unico limite, sopra: gli
+header CORS.
+
+**Il `debug` di Starlette non è raggiungibile.** `FastAPI(debug=...)` non viene
+mai passato e nessuna variabile d'ambiente lo tocca: `app.debug` e
+`ServerErrorMiddleware.debug` sono `False` per costruzione. Non è "legato a
+`ENVIRONMENT`" — è più forte, l'interruttore non esiste proprio. La posta in
+gioco, misurata su un'app isolata: con `debug=True` la stessa eccezione produce
+**2.534 byte con traceback e password in chiaro** invece di 21.
+
 ### ⚠️ RISCHIO RESIDUO — attacco Sybil con più account
 
 Il tetto limita il danno di **un** account, non di molti. Chi registra N

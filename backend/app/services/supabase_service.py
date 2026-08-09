@@ -49,13 +49,17 @@ from postgrest.exceptions import APIError
 from supabase import AsyncClient, AsyncClientOptions, acreate_client
 
 from app.core.config import Settings, get_settings
-from app.core.exceptions import ConflictError, DatabaseError
+from app.core.exceptions import ConflictError, DatabaseError, PlanLimitError
 
 logger = logging.getLogger(__name__)
 
 # Codici Postgres che hanno una traduzione HTTP precisa.
 _UNIQUE_VIOLATION: Final = "23505"
 _FOREIGN_KEY_VIOLATION: Final = "23503"
+# SQLSTATE di dominio, sollevato da `enforce_creator_limit` (migration 0004).
+# Non è uno standard Postgres: è uno spazio riservato a noi, così un limite di
+# piano non si confonde con un guasto del database.
+_PLAN_LIMIT: Final = "PX001"
 
 # `profiles` è scopata sulla PK, non su una colonna `user_id`.
 _SCOPE_COLUMN: Final[dict[str, str]] = {
@@ -278,6 +282,14 @@ def translate_postgrest_error(exc: APIError, *, context: str) -> Exception:
     if code == _FOREIGN_KEY_VIOLATION:
         logger.info("Violazione di foreign key (%s): %s", context, exc.message)
         return ConflictError("Riferimento a una risorsa inesistente.")
+
+    if code == _PLAN_LIMIT:
+        # Senza questo ramo il limite di piano finirebbe nel caso generico qui
+        # sotto, e l'utente leggerebbe "servizio dati non disponibile" avendo
+        # semplicemente raggiunto il tetto del proprio piano: un 503 al posto di
+        # un 409, e un messaggio che manda a cercare un guasto inesistente.
+        logger.info("Limite di piano raggiunto (%s): %s", context, exc.message)
+        return PlanLimitError()
 
     logger.error(
         "Errore Supabase (%s) code=%s message=%s", context, code, exc.message, exc_info=True

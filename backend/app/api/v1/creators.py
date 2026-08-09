@@ -41,7 +41,13 @@ router = APIRouter(prefix="/api/v1/creators", tags=["creators"], route_class=Saf
     summary="Aggiunge un creator alla watchlist",
     responses={
         401: {"description": "JWT assente o non valido."},
-        409: {"description": "Creator già presente per questo utente su questa piattaforma."},
+        409: {
+            "description": (
+                "Creator già presente per questo utente su questa piattaforma "
+                "(`conflict`), oppure limite di creator attivi del piano "
+                "raggiunto (`plan_limit_reached`)."
+            )
+        },
         422: {"description": "Dati del creator non validi."},
     },
 )

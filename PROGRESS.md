@@ -493,6 +493,85 @@ policy, nessun privilegio ad `anon` e `authenticated`, indice su `expires_at`.
 Gli scenari A/B/C sono stati poi rieseguiti contro la tabella vera con esito
 verde, e le righe di prova rimosse.
 
+### ✅ RISOLTO — abuso di costo via insert diretti su `creators` (vettore B)
+
+Chiuso il 9 agosto 2026, migration `0004`. Emerso dall'audit di readiness
+sicurezza, sezione 2, e corretto **prima** di completare l'audit perché
+sfruttabile in produzione nel momento in cui è stato misurato.
+
+**Il vettore, misurato.** Un utente autenticato possiede publishable key e JWT,
+quindi può scrivere su `creators` direttamente via PostgREST senza toccare
+alcun endpoint. Misurato: **186 insert in 15 secondi (744/minuto)**, nessun
+rifiuto, e tutte le righe rientravano nella SELECT del cron. A 10 risultati
+Apify per creator e $2,70/1.000 risultati, un'ora di insert costava **$1.205
+per singola esecuzione del cron**, ripetuta a ogni giro.
+
+**Perché un tetto e non una revoca.** La revoca — la strada della `0002` per
+`profiles` — qui avrebbe rotto l'applicazione: `POST`, `PATCH` e `DELETE
+/api/v1/creators` scrivono con la chiave dell'utente (`scoped_client`), non con
+la service role. Verificato riga per riga prima di decidere. Spostarli al
+bypass del RLS avrebbe contraddetto la scelta architetturale dichiarata nel
+README.
+
+**La correzione.** Trigger `creators_enforce_limit` che conta i creator
+**attivi** per utente e li limita in base a `profiles.subscription_tier`:
+`free` → 30, `pro` → 200 (segnaposto, da fissare contro il prezzo del piano).
+Il conteggio guarda solo `is_active` — chi cancella o disattiva libera uno slot
+— e il controllo scatta anche sull'UPDATE, ma solo sulla transizione che
+aumenta gli attivi: senza, bastava creare al tetto, disattivare, creare altri e
+riattivare tutti.
+
+Il numero viene dal costo misurato: ~$0,140 al giorno per creator attivo
+(Apify $0,108 + Gemini ~$0,032), quindi **~$4,20 al giorno** per un utente al
+tetto, sotto la soglia di $5 fissata.
+
+In più: **revocati INSERT/UPDATE/DELETE su `insights`** ad `authenticated`.
+Verificato che con la chiave utente il backend lì faccia solo SELECT. Chiude la
+possibilità di fabbricare righe di `insights`, che sarebbe stata una via per
+falsificare qualunque contatore di quota basato su di esse.
+
+**Prova** (`tests/test_limite_piano.py` per la traduzione dell'errore, più
+verifica sul progetto reale con utente usa e getta):
+
+| Prova | Esito |
+|---|---|
+| Insert diretti PostgREST da zero | si fermano a **30 esatti**, poi HTTP 400 `PX001` |
+| 31° creator dal backend | **409 `plan_limit_reached`**, messaggio pulito |
+| Dettagli interni nella risposta | **nessuno** (né SQLSTATE, né nome funzione, né tabella) |
+| DELETE poi CREATE | 201 — lo slot si libera |
+| PATCH `is_active=false` poi CREATE | 201 — contano solo gli attivi |
+| Riattivazione mentre si è al tetto | **409** — la scappatoia è chiusa |
+| `GET /creators`, `GET /insights` | 200 — lettura intatta dopo la revoca |
+
+### ⚠️ RISCHIO RESIDUO — attacco Sybil con più account
+
+Il tetto limita il danno di **un** account, non di molti. Chi registra N
+account ottiene N × 30 creator attivi, e il costo torna a scalare linearmente.
+
+L'unica barriera oggi è la **verifica email di Supabase Auth**, che alza il
+costo dell'attacco ma non lo impedisce: gli indirizzi usa e getta sono gratuiti
+e automatizzabili.
+
+Nessuna azione ora — è una decisione di prodotto che va presa insieme al
+billing. Le opzioni sul tavolo: CAPTCHA al signup, limite di registrazioni per
+IP o per dominio email, verifica della carta anche sul piano gratuito, oppure
+un tetto globale di spesa per progetto lato Apify/Gemini come rete di sicurezza
+indipendente dal numero di account.
+
+### ⚠️ DA FARE — il vettore A resta aperto: nessun rate limit su `analyze-video`
+
+**Questo fix non lo chiude.** L'endpoint `POST /api/v1/analyze-video` non ha né
+rate limiter né tetto di concorrenza: misurato **64 richieste/minuto accettate
+in sequenza, zero risposte 429, e 10 richieste concorrenti su 10 accettate**.
+
+Il tetto ai creator non c'entra: quello limita il cron, questo è il percorso
+manuale, e ogni richiesta accettata è una inferenza Gemini più una chiamata
+Apify. Con concorrenza 10 e latenza 60s sono **600 analisi/ora**, cioè **$37 –
+$175 all'ora** per singolo account a seconda del modello dietro
+`gemini-flash-latest`.
+
+Da affrontare prima del lancio a pagamento, insieme al resto dell'audit.
+
 ### ⚠️ PRIORITÀ MEDIA — due esecuzioni del cron sovrapposte duplicano lo scraping
 
 Emerso dalla scansione dei pattern gemelli del 9 agosto 2026. **Solo segnalato,

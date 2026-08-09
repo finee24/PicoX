@@ -543,6 +543,65 @@ verifica sul progetto reale con utente usa e getta):
 | Riattivazione mentre si è al tetto | **409** — la scappatoia è chiusa |
 | `GET /creators`, `GET /insights` | 200 — lettura intatta dopo la revoca |
 
+### ✅ VERIFICATO — nessun segreto è mai stato committato (audit sezione 4)
+
+Eseguito il **10 agosto 2026**. Risponde alla domanda che `scan-secrets.sh` non
+può coprire: quello guarda l'albero corrente, quindi un segreto committato e poi
+rimosso gli resterebbe invisibile.
+
+**Metodo.** Non uno scanner generico, ma i **pattern già calibrati** di
+`.github/scripts/scan-secrets.sh` — tarati su questo codice per non dare falsi
+positivi su token di test e regex del detector — applicati allo storico per tre
+vie complementari:
+
+1. `git grep` su **tutti i 14 commit** raggiungibili da *ogni* ref (non solo
+   `main`, non solo `HEAD`);
+2. spazzata di **tutti i 180 blob dell'object database**, inclusi i **16
+   irraggiungibili** — quelli di commit riscritti da rebase o amend, che
+   `rev-list --all` non vede e che uno scan sui soli ref mancherebbe;
+3. elenco dei **135 path distinti mai esistiti** in storico, per intercettare un
+   `.env` o un file di log entrato e poi tolto.
+
+Ai pattern calibrati sono stati aggiunti, solo per lo storico, JWT generico,
+AWS `AKIA`, token GitHub e Slack, e l'assegnazione di una variabile server-only
+con valore di lunghezza reale: formati che il codice di oggi non usa ma che un
+commit vecchio potrebbe contenere.
+
+**Control group.** I pattern sono stati verificati contro un file-esca con
+credenziali sintetiche di ciascun formato (JWT `service_role`, `sb_secret_`,
+`apify_api_`, `AIza`): tutti intercettati. Senza questa prova, "zero hit"
+avrebbe potuto significare "regex cieca". Il file non è mai entrato nel repo.
+
+**Cross-check indipendente.** `detect-secrets` 1.5.0 (27 plugin, inclusi quelli
+entropici) su tutti i 180 blob materializzati su disco, per coprire formati che
+i pattern calibrati non prevedono. 1.469 finding, tutti classificati e tutti
+falsi positivi: **1.460** sono gli hash `integrity` `sha512-` di due versioni di
+`frontend/package-lock.json`, i restanti 9 sono le costanti letterali dei test
+(`test-cron-secret`, `test-jwt-secret`, `test-gemini-key`, `"sbagliato"`) e le
+fixture con token dichiaratamente finti. Installato in un venv usa e getta,
+rimosso a fine lavoro: **non è una dipendenza del progetto**.
+
+**Esito: pulito.** Nessuna credenziale reale in alcun commit, in alcun branch,
+in alcun blob. In particolare:
+
+| Verifica | Esito |
+|---|---|
+| Chiave `service_role` / `sb_secret_` in storico | **nessuna** |
+| Token Apify / Gemini / OpenAI / AWS / GitHub / Slack | **nessuno** |
+| Chiavi private PEM | **nessuna** |
+| File `.env` mai tracciato | **nessuno** (solo i tre `.example`) |
+| `backend.log` mai entrato in un commit | **confermato** |
+
+L'ultimo punto è quello che conta di più: la `service_role` key trapelata e
+ruotata il 9 agosto 2026 stava in `backend.log`, un file **non tracciato**. La
+scansione conferma che non è mai finita in un commit, quindi la rotazione già
+fatta chiude il caso e **non serve alcuna riscrittura della cronologia**.
+
+Nota minore, senza impatto: fra i blob irraggiungibili c'è una chiave
+`sb_publishable_`, residuo delle verifiche degli hook. È pubblica per
+progettazione — è la chiave che sta nel bundle del browser — ed è comunque in un
+oggetto che nessun ref raggiunge.
+
 ### ⚠️ RISCHIO RESIDUO — attacco Sybil con più account
 
 Il tetto limita il danno di **un** account, non di molti. Chi registra N

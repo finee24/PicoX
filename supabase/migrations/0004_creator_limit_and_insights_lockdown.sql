@@ -147,3 +147,77 @@ create trigger creators_enforce_limit
   before insert or update on public.creators
   for each row
   execute function public.enforce_creator_limit();
+
+
+-- -----------------------------------------------------------------------------
+-- 3. Come scavalcare il tetto quando serve davvero
+-- -----------------------------------------------------------------------------
+-- Questo trigger **non è limitato per ruolo**: scatta per `authenticated`, per
+-- `service_role` e anche per `postgres` dall'SQL editor. Oggi nessun percorso
+-- applicativo ne risente — l'unico accesso non-utente a `creators` è la SELECT
+-- del cron — ma ci sono tre casi in cui vi troverete a doverlo aggirare:
+--
+--   * **restore o import di dati**: reimportare un utente che aveva
+--     legittimamente 200 creator mentre il suo profilo dice `free` fallisce
+--     riga per riga;
+--   * **tooling di supporto**: concedere un'eccezione a un singolo cliente;
+--   * **riattivazioni massive**: un `update ... set is_active = true` in blocco
+--     colpisce il ramo UPDATE del trigger.
+--
+-- PRIMA DI DISATTIVARE QUALCOSA: per il caso "supporto" la strada giusta non è
+-- scavalcare il trigger ma alzare il piano, che lascia una traccia leggibile e
+-- non richiede privilegi speciali:
+--
+--     update public.profiles set subscription_tier = 'pro' where id = '<uuid>';
+--
+--
+-- OPZIONE A — disabilitare il solo trigger (consigliata, chirurgica)
+--
+--     begin;
+--     alter table public.creators disable trigger creators_enforce_limit;
+--     -- ... restore / import / update in blocco ...
+--     alter table public.creators enable trigger creators_enforce_limit;
+--     commit;
+--
+-- Richiede di essere proprietari della tabella: dall'SQL editor di Supabase
+-- (ruolo `postgres`) funziona, dal backend via PostgREST no.
+--
+-- ⚠️ `ALTER TABLE ... DISABLE TRIGGER` prende un lock ACCESS EXCLUSIVE su
+-- `creators`: finché la transazione non chiude, **ogni** altra lettura o
+-- scrittura sulla tabella resta in attesa, cron compreso. Tenete la transazione
+-- corta, o fatelo in finestra di manutenzione.
+--
+-- ⚠️ Se la transazione fallisce a metà il `rollback` ripristina anche lo stato
+-- del trigger, quindi non resta disabilitato — ma se disabilitate **fuori** da
+-- una transazione e il processo muore, resta disabilitato e nessuno se ne
+-- accorge. Da qui il `begin/commit`, che non è decorativo.
+--
+--
+-- OPZIONE B — `session_replication_role` (più ampia, più rischiosa)
+--
+--     begin;
+--     set local session_replication_role = replica;
+--     -- ... operazione ...
+--     commit;
+--
+-- ⚠️ Disattiva **tutti** i trigger non-replica della sessione, non solo questo:
+-- salta anche `set_creators_updated_at` (quindi `updated_at` resta indietro) e,
+-- soprattutto, **i controlli di integrità referenziale**, che in PostgreSQL
+-- sono implementati come trigger di sistema. In `replica` si possono inserire
+-- righe con `user_id` inesistenti, che le FK avrebbero rifiutato.
+--
+-- Serve il ruolo `postgres`. `SET LOCAL` limita l'effetto alla transazione: usare
+-- `SET` senza `LOCAL` lo lascia attivo per tutta la connessione, ed è il modo
+-- classico di corrompere dati senza accorgersene.
+--
+-- Usare A salvo che serva davvero disattivare anche le FK.
+--
+--
+-- DOPO, SEMPRE: verificare che il trigger sia tornato attivo.
+--
+--     select tgname, tgenabled from pg_trigger
+--      where tgrelid = 'public.creators'::regclass and not tgisinternal;
+--
+-- `tgenabled = 'O'` significa abilitato; `'D'` disabilitato. Un `'D'`
+-- dimenticato riapre esattamente il vettore di abuso che questa migration
+-- chiude, e non lo segnala nessuno.

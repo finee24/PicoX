@@ -188,6 +188,49 @@ def _build_insight_payload(
     return payload
 
 
+async def _assicura_attribuzione(
+    record: InsightResponse,
+    user_id: str,
+    creator_id: UUID | str | None,
+) -> InsightResponse:
+    """Aggancia il creator a un insight che ne è privo, su un cache hit.
+
+    Omettere `creator_id` dall'upsert impedisce di **cancellare** l'attribuzione,
+    ma non basta: se due richieste corrono sullo stesso video e vince quella
+    manuale — che un creator non ce l'ha — l'analisi viene scritta senza, e chi
+    aveva il creator riceve quel risultato come cache hit senza mai scriverlo.
+    Nessuno ha sovrascritto nulla, eppure l'attribuzione non c'è.
+
+    E non si recupererebbe da sé: il cron salta i video che hanno già un
+    insight (`_filter_already_analyzed`), quindi non tornerebbe mai su quella
+    riga. L'attribuzione andrebbe persa per sempre in silenzio, che è
+    esattamente il difetto da cui questa modifica nasce.
+
+    L'aggiornamento è mirato e non tocca altro: solo la colonna, solo se è
+    ancora vuota, filtrando su PK **e** proprietario.
+    """
+    if not creator_id or record.creator_id is not None:
+        return record
+
+    insights = await service_table("insights", user_id)
+    async with db_errors("attribuzione del creator su insight esistente"):
+        result = await (
+            insights.update({"creator_id": str(creator_id)})
+            .eq("id", str(record.id))
+            .is_("creator_id", "null")
+            .execute()
+        )
+
+    if not result.data:
+        # Un'altra richiesta l'ha attribuito nel frattempo: va bene così.
+        return record
+
+    logger.info(
+        "Attribuzione del creator %s aggiunta all'insight %s.", creator_id, record.id
+    )
+    return InsightResponse.model_validate(result.data[0])
+
+
 async def perform_analysis(
     *,
     user_id: str,
@@ -221,17 +264,18 @@ async def perform_analysis(
     )
     if cached is not None:
         logger.info("Cache hit su insights per l'utente %s", user_id)
-        return cached, True
+        return await _assicura_attribuzione(cached, user_id, creator_id), True
 
     async with analysis_lock(user_id, video_url, mode, settings) as ottenuto:
         if not ottenuto:
-            return await _attendi_analisi_altrui(
+            atteso, _ = await _attendi_analisi_altrui(
                 user_id,
                 video_url,
                 mode,
                 access_token=access_token,
                 settings=settings,
             )
+            return await _assicura_attribuzione(atteso, user_id, creator_id), True
 
         # Ricontrollo dopo l'acquisizione. Fra il lookup qui sopra e il lock può
         # essere passata un'altra richiesta che ha completato l'analisi: senza
@@ -249,7 +293,7 @@ async def perform_analysis(
                 "Analisi già completata da una richiesta concorrente per l'utente %s",
                 user_id,
             )
-            return cached, True
+            return await _assicura_attribuzione(cached, user_id, creator_id), True
 
         return await _esegui_analisi(
             user_id=user_id,

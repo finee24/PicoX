@@ -472,9 +472,26 @@ Coperti anche: sottrazione del lock scaduto, lock valido non sottraibile,
 rilascio su successo e su fallimento, `409` allo scadere dell'attesa, e utenti
 diversi sullo stesso video che non si bloccano a vicenda.
 
-⚠️ **La migration `0003` non è ancora stata applicata al progetto remoto.** Il
-codice la richiede: senza la tabella, ogni analisi fallisce. Va applicata
-**prima** di distribuire questo branch.
+**Un cache hit non basta a preservare l'attribuzione.** Omettere `creator_id`
+dall'upsert impedisce di *cancellarlo*, ma se due richieste corrono sullo stesso
+video e vince quella manuale — che un creator non ce l'ha — l'analisi viene
+scritta senza, e il cron riceve quel risultato come cache hit senza mai
+attribuirlo. Nessuno sovrascrive nulla, eppure l'attribuzione manca; e non si
+recupera da sé, perché `_filter_already_analyzed` fa saltare al cron i video che
+hanno già un insight. Da qui `_assicura_attribuzione`, che su un cache hit
+aggancia il creator a una riga che ne è priva, filtrando su PK, proprietario e
+`creator_id is null`.
+
+Il difetto è emerso **solo** eseguendo gli scenari contro il database vero: nel
+doppio di test l'ordine di scheduling era quello favorevole, e il test passava
+per fortuna. Ora l'ordine è forzato nel verso sfavorevole ed è stato verificato
+che il test fallisca se la correzione viene disattivata.
+
+✅ **Migration `0003` applicata al progetto remoto** il 9 agosto 2026, con
+schema verificato: PK `(user_id, video_url, analysis_mode)`, RLS attivo e zero
+policy, nessun privilegio ad `anon` e `authenticated`, indice su `expires_at`.
+Gli scenari A/B/C sono stati poi rieseguiti contro la tabella vera con esito
+verde, e le righe di prova rimosse.
 
 ### ⚠️ PRIORITÀ MEDIA — due esecuzioni del cron sovrapposte duplicano lo scraping
 

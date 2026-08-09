@@ -143,22 +143,31 @@ async def test_creator_id_sopravvive_a_una_analisi_manuale_concorrente(
 ) -> None:
     """Prima della correzione `creator_id` finiva a `None`.
 
-    Il cron passa il creator, il path manuale no: vinca chi vinca la corsa,
-    l'attribuzione non deve sparire.
+    L'ordine è forzato, e nell'unico verso che conta: **il manuale parte per
+    primo e vince il lock**. È il caso che una prima versione della correzione
+    non copriva — nessuno sovrascriveva niente, semplicemente l'analisi la
+    scriveva chi il creator non ce l'ha, e il cron riceveva quel risultato come
+    cache hit senza mai attribuirlo. Verificandolo con `asyncio.gather` e basta,
+    il test passava o falliva a seconda di quale coroutine lo scheduler
+    toccava per prima.
     """
     _poll_rapido(monkeypatch)
     _rallenta(gemini)
     settings = get_settings()
 
+    async def cron_in_ritardo():
+        # Abbastanza da garantire che il manuale abbia già preso il lock.
+        await asyncio.sleep(0.03)
+        return await _analizza(
+            user_id=USER_ID, video_url=VIDEO_URL, mode="BOTH",
+            settings=settings, gemini=gemini, apify=apify, creator_id=CREATOR_ID,
+        )
+
     manuale = _analizza(
         user_id=USER_ID, video_url=VIDEO_URL, mode="BOTH",
         settings=settings, gemini=gemini, apify=apify,
     )
-    cron = _analizza(
-        user_id=USER_ID, video_url=VIDEO_URL, mode="BOTH",
-        settings=settings, gemini=gemini, apify=apify, creator_id=CREATOR_ID,
-    )
-    await asyncio.gather(cron, manuale)
+    await asyncio.gather(manuale, cron_in_ritardo())
 
     assert store.count("insights") == 1
     assert store.rows("insights")[0]["creator_id"] == CREATOR_ID

@@ -57,6 +57,23 @@ class ConflictError(PicoxError):
     default_message = "La risorsa esiste già."
 
 
+class AnalysisInProgressError(PicoxError):
+    """Un'altra richiesta sta già analizzando questo video per questo utente.
+
+    409 e non 425 o 503: la richiesta non è "troppo presto" né il servizio è
+    indisponibile — è lo stato attuale della risorsa a rendere l'operazione
+    superflua. Non è un errore da cui difendersi: l'analisi in corso arriverà a
+    termine, e la richiesta successiva la troverà in cache.
+    """
+
+    status_code = 409
+    code = "analysis_in_progress"
+    default_message = (
+        "Questo video è già in analisi. Riprova fra poco: il risultato sarà "
+        "disponibile senza doverla rifare."
+    )
+
+
 class PicoxValidationError(PicoxError):
     """Input non valido: body malformato, video oltre i limiti consentiti."""
 

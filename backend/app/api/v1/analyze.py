@@ -19,17 +19,21 @@ background senza un JWT di sessione.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from typing import Annotated, Any, Final
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Response, status
 
 from app.core.config import Settings, get_settings
+from app.core.exceptions import AnalysisInProgressError
 from app.core.security import CurrentUser
 from app.middleware.error_handler import SafeRoute
 from app.schemas.analysis import AnalysisMode, AnalyzeVideoRequest, VideoAnalysisResponse
 from app.schemas.insights import InsightResponse
+from app.services.analysis_lock import analysis_lock
 from app.services.apify_service import ApifyService, ScrapedVideo, get_apify_service
 from app.services.gemini_service import GeminiService, get_gemini_service
 from app.services.media_service import download_to_temp, normalize_video_url
@@ -142,9 +146,22 @@ def _build_insight_payload(
     forma del `jsonb` resta stabile fra un record e l'altro, così il frontend
     distingue "campo assente perché il video non ce l'aveva" da "campo che non
     esisteva nello schema di allora".
+
+    **`creator_id` fa eccezione e viene omesso quando è `None`**, e la ragione è
+    l'opposto della stabilità: l'upsert genera `ON CONFLICT DO UPDATE SET` sulle
+    sole colonne presenti nel payload, quindi una chiave assente lascia intatto
+    il valore già in archivio. Includerla a `None` significherebbe cancellare
+    l'attribuzione al creator.
+
+    Non è un caso di scuola né richiede concorrenza. Il job cron scrive
+    l'insight *con* il creator (`cron.py`); il path manuale non ha un creator da
+    passare (`analyze.py`, endpoint `analyze-video`). Basta quindi che l'utente
+    richieda a mano un video già analizzato dal cron, in una modalità che la
+    riga esistente non copre, perché la rianalisi ne cancelli il creator —
+    senza errore, senza log, e con l'attribuzione storica persa per sempre,
+    dato che `insights` non denormalizza l'handle.
     """
-    return {
-        "creator_id": str(creator_id) if creator_id else None,
+    payload: dict[str, Any] = {
         "video_url": video_url,
         "thumbnail_url": thumbnail_url,
         "analysis_mode": mode,
@@ -166,6 +183,10 @@ def _build_insight_payload(
         "keywords": list(analysis.keywords),
     }
 
+    if creator_id:
+        payload["creator_id"] = str(creator_id)
+    return payload
+
 
 async def perform_analysis(
     *,
@@ -184,6 +205,12 @@ async def perform_analysis(
     Restituisce `(record, from_cache)`. `scraped` permette al job cron di
     riutilizzare i metadati già ottenuti dallo scraping, evitando una seconda
     chiamata ad Apify per lo stesso video.
+
+    Il lavoro vero è protetto da un lock su `(user_id, video_url, mode)`: senza,
+    N richieste concorrenti sullo stesso video producono N inferenze Gemini e N
+    run Apify per finire in un'unica riga, cioè si paga N volte un risultato
+    solo. Chi non ottiene il lock non duplica la spesa: attende che il
+    detentore finisca e ne restituisce il risultato.
     """
     cached = await find_cached_insight(
         user_id,
@@ -196,6 +223,105 @@ async def perform_analysis(
         logger.info("Cache hit su insights per l'utente %s", user_id)
         return cached, True
 
+    async with analysis_lock(user_id, video_url, mode, settings) as ottenuto:
+        if not ottenuto:
+            return await _attendi_analisi_altrui(
+                user_id,
+                video_url,
+                mode,
+                access_token=access_token,
+                settings=settings,
+            )
+
+        # Ricontrollo dopo l'acquisizione. Fra il lookup qui sopra e il lock può
+        # essere passata un'altra richiesta che ha completato l'analisi: senza
+        # questa seconda lettura la pagheremmo di nuovo, che è esattamente ciò
+        # che il lock esiste per evitare.
+        cached = await find_cached_insight(
+            user_id,
+            video_url,
+            access_token=access_token,
+            settings=settings,
+            required_mode=mode,
+        )
+        if cached is not None:
+            logger.info(
+                "Analisi già completata da una richiesta concorrente per l'utente %s",
+                user_id,
+            )
+            return cached, True
+
+        return await _esegui_analisi(
+            user_id=user_id,
+            video_url=video_url,
+            mode=mode,
+            settings=settings,
+            gemini=gemini,
+            apify=apify,
+            access_token=access_token,
+            creator_id=creator_id,
+            scraped=scraped,
+        )
+
+
+async def _attendi_analisi_altrui(
+    user_id: str,
+    video_url: str,
+    mode: AnalysisMode,
+    *,
+    access_token: str | None,
+    settings: Settings,
+) -> tuple[InsightResponse, bool]:
+    """Attende che chi detiene il lock finisca, e ne restituisce il risultato.
+
+    L'attesa è un `await` su un poll, non un thread occupato: il costo di
+    aspettare è molto più basso di quanto suggerirebbe il fallimento immediato,
+    e in cambio un doppio click torna a essere invisibile all'utente invece di
+    diventare un errore.
+
+    Il timeout è deliberatamente scorrelato dal TTL del lock: quello è un
+    vincolo di correttezza — deve superare la durata massima di un'analisi,
+    altrimenti il mutex si rompe — mentre questo è una scelta di esperienza
+    utente. Scaduto, si risponde 409: l'analisi altrui prosegue comunque, e una
+    richiesta successiva la troverà in cache.
+    """
+    scadenza = time.monotonic() + settings.analysis_lock_wait_seconds
+    logger.info(
+        "Analisi già in corso per %s (modalità %s): attesa del risultato.",
+        video_url,
+        mode,
+    )
+
+    while True:
+        await asyncio.sleep(settings.analysis_lock_poll_seconds)
+
+        pronto = await find_cached_insight(
+            user_id,
+            video_url,
+            access_token=access_token,
+            settings=settings,
+            required_mode=mode,
+        )
+        if pronto is not None:
+            return pronto, True
+
+        if time.monotonic() >= scadenza:
+            raise AnalysisInProgressError()
+
+
+async def _esegui_analisi(
+    *,
+    user_id: str,
+    video_url: str,
+    mode: AnalysisMode,
+    settings: Settings,
+    gemini: GeminiService,
+    apify: ApifyService,
+    access_token: str | None,
+    creator_id: UUID | str | None,
+    scraped: ScrapedVideo | None,
+) -> tuple[InsightResponse, bool]:
+    """La pipeline vera, eseguita col lock in mano."""
     # Best effort: serve l'URL diretto del media, perché la pagina del post non
     # è un file video. Un fallimento non è fatale — si tenta comunque l'URL
     # originale, che per un link diretto a un .mp4 funziona.
@@ -260,6 +386,12 @@ async def perform_analysis(
     responses={
         200: {"description": "Video già analizzato: restituito il record in cache."},
         401: {"description": "JWT assente o non valido."},
+        409: {
+            "description": (
+                "Un'altra richiesta sta già analizzando questo video per lo stesso "
+                "utente e non ha finito entro l'attesa massima."
+            )
+        },
         422: {"description": "URL non valido, oppure video oltre i limiti di dimensione o durata."},
         503: {"description": "Gemini o Apify non disponibili."},
     },

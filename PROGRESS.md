@@ -407,35 +407,103 @@ Stop-Process -Id <id1>,<id2> -Force
 - Due `DeprecationWarning` nei test, da dipendenze esterne (`starlette.testclient`
   con httpx, `apify-shared`). Innocui.
 
-### ⚠️ PRIORITÀ ALTA — race condition sull'upsert di `analyze-video`
+### ✅ RISOLTO — spesa duplicata e perdita di `creator_id` su `analyze-video`
 
-Emersa dalla review avversariale dell'8 agosto 2026, **riprodotta eseguendo il
-codice**: 3 `POST` concorrenti sullo stesso URL dallo stesso utente producono
-`3 chiamate Gemini, 3 run Apify, 1 riga`.
+Risolto il 9 agosto 2026, branch `fix-concurrent-upsert-race`. Erano **due
+difetti distinti** con la stessa origine — nessuna coordinazione fra richieste
+che scrivono sulla stessa riga di `insights` — e hanno richiesto due garanzie
+separate.
 
-Tenuta fuori dal batch di fix pre-commit per scelta esplicita: la correzione
-richiede una prenotazione della riga (o un advisory lock) e va progettata, non
-improvvisata sotto la scadenza di un commit.
+**Correzione della diagnosi originale.** La nota precedente diceva che era il
+cron a cancellare `creator_id` per mancanza di contesto. È il contrario, ed è
+stato verificato riga per riga: il cron **passa** `creator_id`
+(`cron.py:126`, da `_AnalysisJob`), mentre è il **path manuale** a ometterlo —
+`analyze-video` chiama `perform_analysis` senza quel parametro, che vale `None`
+per default. `_build_insight_payload` metteva comunque la chiave nel payload, e
+l'upsert la riscriveva a `NULL`.
 
-> **upsert concorrente può staccare `creator_id` da un insight se un'analisi
-> manuale corre insieme al cron — corruzione dati silenziosa, non solo doppia
-> spesa**
+**E non era una race.** Lo scenario quotidiano non richiede concorrenza: il
+cron analizza un video in `INFO`, l'utente più tardi lo richiede in `BOTH`, la
+riga non copre la modalità, si rianalizza e la riscrittura cancella il creator.
+Da notare che il fix `required_mode` sulla cache, introdotto l'8 agosto, ha
+**aumentato** l'esposizione a questo difetto: prima qualunque riga esistente
+era un cache hit e l'upsert non rigirava quasi mai.
 
-Il punto è quest'ultimo. Fra `find_cached_insight` (`analyze.py:145`) e
-l'`upsert` (`:184`) passa l'intera pipeline, decine di secondi in produzione.
-L'upsert riscrive **tutte** le colonne, e `_build_insight_payload` (`:104`)
-scrive `creator_id: None` quando il chiamante non lo passa — cioè sempre,
-nell'analisi manuale. Un'analisi lanciata a mano mentre il cron sta elaborando
-lo stesso video stacca quindi l'insight dal suo creator, in silenzio e senza
-errori. La doppia spesa si vede in fattura; questa no.
+**Garanzia 1 — spesa.** Lock a scadenza su `(user_id, video_url, analysis_mode)`
+nella nuova tabella `analysis_locks` (`supabase/migrations/0003_analysis_locks.sql`,
+modulo `app/services/analysis_lock.py`). Chi non ottiene il lock non rianalizza:
+attende il risultato e lo restituisce come cache hit, oppure risponde `409`
+(`AnalysisInProgressError`) se l'attesa scade.
 
-Correzioni possibili, in ordine di invasività:
-1. prenotare la riga prima delle chiamate esterne (`insert` con stato
-   `pending`, `23505` → si rilegge e si restituisce `200`/`202`);
-2. `pg_advisory_xact_lock(hashtext(user_id || video_url))` via RPC prima del
-   lookup — non richiede migration;
-3. minimo indispensabile per la sola corruzione: escludere `creator_id`
-   dalle colonne aggiornate dall'upsert quando è `None`.
+Non è stato usato `pg_advisory_lock`, che sarebbe stato il meccanismo naturale:
+questo backend non ha una connessione Postgres da tenere aperta — parla col
+database solo via PostgREST in HTTP — e un lock di sessione preso su una
+connessione poolata resterebbe orfano. Il ragionamento completo è nel commento
+in testa alla migration.
+
+**Lock orfani.** Il rilascio in `finally` è solo un'ottimizzazione: un processo
+ucciso da OOM o un container riavviato non eseguono nulla in uscita. Ogni riga
+porta `expires_at`, e l'acquisizione sottrae i lock scaduti con un `UPDATE`
+condizionale atomico. Nessun processo di pulizia, nessun cron: la prima
+richiesta che arriva dopo la scadenza riassorbe la chiave.
+
+**I due timeout sono numeri diversi e vanno tenuti separati.**
+`analysis_lock_ttl_seconds` (1200s) è un vincolo di correttezza: deve superare
+il caso peggiore di un'analisi legittima — Apify 180 + download 120 + attesa
+file Gemini 120 + inferenza 300 per ciascuno dei 2 tentativi = 1020s — perché
+se scadesse prima, un'altra richiesta sottrarrebbe il lock a un'analisi in
+corso e la doppia spesa tornerebbe. `analysis_lock_wait_seconds` (90s) è invece
+una scelta di esperienza utente, e può essere molto più breve.
+
+**Garanzia 2 — integrità.** `_build_insight_payload` **omette** `creator_id`
+quando è `None`. L'upsert genera `ON CONFLICT DO UPDATE SET` sulle sole colonne
+presenti, quindi una chiave assente lascia intatto il valore in archivio. Non
+dipende dal lock: chiude anche il caso sequenziale.
+
+**Prova, prima e dopo** (`tests/test_concorrenza_analisi.py`, 10 test):
+
+| Scenario | Prima | Dopo |
+|---|---|---|
+| 3 POST concorrenti identici | 3 Gemini, 3 Apify, 3 download, `[201,201,201]` | **1** Gemini, **1** Apify, **1** download, `[201,200,200]` |
+| Manuale + cron in parallelo | `creator_id` → `None` | `creator_id` **preservato**, 1 sola analisi |
+| Cron `INFO` poi manuale `BOTH`, sequenziale | `creator_id` → `None` | `creator_id` **preservato** |
+
+Coperti anche: sottrazione del lock scaduto, lock valido non sottraibile,
+rilascio su successo e su fallimento, `409` allo scadere dell'attesa, e utenti
+diversi sullo stesso video che non si bloccano a vicenda.
+
+⚠️ **La migration `0003` non è ancora stata applicata al progetto remoto.** Il
+codice la richiede: senza la tabella, ogni analisi fallisce. Va applicata
+**prima** di distribuire questo branch.
+
+### ⚠️ PRIORITÀ MEDIA — due esecuzioni del cron sovrapposte duplicano lo scraping
+
+Emerso dalla scansione dei pattern gemelli del 9 agosto 2026. **Solo segnalato,
+non corretto.**
+
+`POST /api/v1/cron/check-updates` non ha alcuna guardia contro esecuzioni
+sovrapposte: due scheduler, o un retry che parte mentre il giro precedente è
+ancora in corso, enumerano entrambi i creator e chiamano entrambi
+`apify.fetch_latest_videos` (`cron.py:205`) — una chiamata esterna a pagamento,
+per ogni creator, senza deduplica in volo.
+
+La parte costosa a valle **è ora protetta**: le analisi accodate passano da
+`perform_analysis`, che prende il lock e ricontrolla la cache, quindi Gemini e
+il download non vengono pagati due volte. Resta scoperto lo scraping.
+
+Nota collegata: `_filter_already_analyzed` (`cron.py:84`) è un check-then-act —
+legge quali URL hanno già un insight e poi accoda — ma la finestra che apriva è
+adesso chiusa dal lock, per la stessa ragione.
+
+Un secondo effetto, minore: ogni esecuzione ha il proprio
+`asyncio.Semaphore(cron_max_concurrent_analyses)`, quindi due giri sovrapposti
+possono raddoppiare il parallelismo rispetto al limite configurato.
+
+Pattern controllati e **risultati sani**: `creators.py:68` è un `insert` con
+vincolo `UNIQUE` tradotto in `409`, non un last-writer-wins; `update_creator`
+(`creators.py:112`) scrive solo i campi effettivamente inviati
+(`changed_fields()` con `exclude_none`), quindi nessun campo retrocede per
+omissione; `profiles` non viene mai scritta dal backend.
 
 ### TODO minori
 

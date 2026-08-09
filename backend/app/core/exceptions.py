@@ -57,6 +57,26 @@ class ConflictError(PicoxError):
     default_message = "La risorsa esiste già."
 
 
+class PlanLimitError(PicoxError):
+    """L'utente ha raggiunto un limite previsto dal proprio piano.
+
+    409 e non 403: non è una questione di permessi — l'operazione sarebbe
+    legittima — ma di stato attuale della risorsa, che confligge con la
+    richiesta. Nemmeno 402, che dichiarerebbe un paywall dove oggi c'è solo un
+    tetto tecnico.
+
+    Il messaggio è scritto qui e non ripreso dal database: quello di Postgres
+    resta nei log, come per ogni altro errore tradotto in questo modulo.
+    """
+
+    status_code = 409
+    code = "plan_limit_reached"
+    default_message = (
+        "Hai raggiunto il numero massimo di creator attivi previsto dal tuo "
+        "piano. Disattivane o rimuovine uno per aggiungerne un altro."
+    )
+
+
 class AnalysisInProgressError(PicoxError):
     """Un'altra richiesta sta già analizzando questo video per questo utente.
 

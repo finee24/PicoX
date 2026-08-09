@@ -40,12 +40,40 @@ _OWNER_COLUMN: dict[str, str] = {
     "profiles": "id",
     "creators": "user_id",
     "insights": "user_id",
+    "analysis_locks": "user_id",
+}
+
+# Colonne nullable che il database restituisce comunque, anche quando l'INSERT
+# non le nomina. Servono al doppio per non produrre righe *senza* la chiave:
+# `insights.creator_id` viene omesso di proposito dall'upsert — è così che si
+# evita di cancellare l'attribuzione al creator — e senza questa lista la riga
+# nuova ne resterebbe priva, cosa che in Postgres non può accadere.
+_NULLABLE_COLUMNS: dict[str, tuple[str, ...]] = {
+    "insights": (
+        "creator_id",
+        "thumbnail_url",
+        "summary_data",
+        "style_data",
+        "inverse_script_template",
+    ),
 }
 
 
 def _as_text(value: Any) -> str:
     """PostgREST confronta i filtri come testo (gli UUID arrivano da URL)."""
     return "" if value is None else str(value)
+
+
+def _as_datetime(value: Any) -> datetime | None:
+    """Il valore come `datetime`, se lo è o se ne ha la forma. Altrimenti `None`."""
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
 
 
 class FakeAPIError(APIError):
@@ -154,6 +182,25 @@ class FakeQuery:
     def in_(self, column: str, values: Iterable[Any]) -> FakeQuery:
         wanted = {_as_text(value) for value in values}
         return self._add(lambda row: _as_text(row.get(column)) in wanted)
+
+    def lte(self, column: str, value: Any) -> FakeQuery:
+        """`<=` sul valore della colonna, con i timestamp confrontati come tali.
+
+        Il confronto testuale funzionerebbe sugli ISO-8601 solo finché formato e
+        fuso restano identici fra chi scrive e chi filtra. È esattamente il tipo
+        di assunzione che regge nei test e cade in produzione, quindi qui si
+        confrontano `datetime` veri e si ricade sul testo solo per i valori che
+        timestamp non sono.
+        """
+        limite = _as_datetime(value)
+
+        def predicato(row: Row) -> bool:
+            corrente = _as_datetime(row.get(column))
+            if limite is not None and corrente is not None:
+                return corrente <= limite
+            return _as_text(row.get(column)) <= _as_text(value)
+
+        return self._add(predicato)
 
     def is_(self, column: str, value: Any) -> FakeQuery:
         if value in ("null", None):
@@ -272,6 +319,13 @@ class FakeQuery:
             row.setdefault("updated_at", now)
             row.setdefault("is_active", True)
             row.setdefault("analysis_mode", "BOTH")
+        # Una colonna esiste anche quando l'INSERT non la nomina: il database
+        # la valorizza a NULL e ogni SELECT la restituisce. Ometterla qui
+        # produrrebbe righe prive della chiave, che è uno stato che in
+        # produzione non esiste — e farebbe fallire la validazione dei modelli
+        # di risposta per un motivo inventato dal doppio.
+        for colonna in _NULLABLE_COLUMNS.get(self._table, ()):
+            row.setdefault(colonna, None)
         return row
 
     def _reject_if_rls_violation(self, values: Row) -> None:
@@ -342,6 +396,10 @@ class FakeQuery:
 _UNIQUE_CONSTRAINTS: dict[str, tuple[str, ...]] = {
     "creators": ("user_id", "username", "platform"),
     "insights": ("user_id", "video_url"),
+    # Primary key composita: è il vincolo su cui poggia il mutex, quindi il
+    # doppio deve farla rispettare come il database, altrimenti i test sulla
+    # concorrenza passerebbero per un motivo che in produzione non esiste.
+    "analysis_locks": ("user_id", "video_url", "analysis_mode"),
 }
 
 

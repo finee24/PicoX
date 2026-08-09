@@ -62,6 +62,7 @@ _SCOPE_COLUMN: Final[dict[str, str]] = {
     "profiles": "id",
     "creators": "user_id",
     "insights": "user_id",
+    "analysis_locks": "user_id",
 }
 
 # Tabelle su cui è ammessa una query service-role non filtrata per utente.

@@ -67,6 +67,21 @@ class Settings(BaseSettings):
     # Analisi in background eseguite in parallelo dal job cron.
     cron_max_concurrent_analyses: int = Field(default=2, ge=1)
 
+    # --- Deduplica delle analisi concorrenti ---------------------------------
+    # Durata del lock su (user_id, video_url, analysis_mode). **Deve superare la
+    # durata massima di un'analisi legittima**: se scadesse prima, una seconda
+    # richiesta lo sottrarrebbe a un'analisi ancora in corso e si tornerebbe a
+    # pagare due volte. Il caso peggiore è la somma dei timeout a valle —
+    # Apify 180 + download 120 + attesa del file Gemini 120 + inferenza 300 per
+    # ciascuno dei 2 tentativi = 1020s — e questo default lascia margine.
+    analysis_lock_ttl_seconds: int = Field(default=1200, ge=60)
+    # Quanto attende una richiesta che trova il lock già preso, prima di
+    # arrendersi con 409. È un numero di esperienza utente e non ha alcun
+    # obbligo di coincidere col TTL: attendere costa un `await` su un poll, non
+    # un thread occupato.
+    analysis_lock_wait_seconds: int = Field(default=90, ge=0)
+    analysis_lock_poll_seconds: float = Field(default=1.5, gt=0)
+
     @field_validator("supabase_url")
     @classmethod
     def _strip_trailing_slash(cls, value: str) -> str:

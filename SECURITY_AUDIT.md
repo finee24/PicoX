@@ -11,18 +11,16 @@
 
 ---
 
-## Premessa: una sezione non è stata eseguita
+## Nota di percorso
 
-**La sezione 3 (audit delle dipendenze — `npm audit` / `pip-audit`, vulnerabilità
-high/critical rilevanti per il codice effettivamente eseguito) non è mai stata
-svolta.**
+La **sezione 3** era stata inizialmente saltata: era in coda dopo la sezione 2
+quando l'audit fu interrotto per chiudere subito il vettore B, e alla ripresa si
+passò direttamente alla sezione 4. Non fu una decisione, fu una dimenticanza nel
+cambio di priorità, ed è rimasta aperta come voce **A5** nella prima stesura di
+questo documento.
 
-Era in coda dopo la sezione 2 quando l'audit è stato interrotto per chiudere
-subito il vettore B, e alla ripresa si è passati direttamente alla sezione 4.
-Non è stata saltata per una decisione: è stata dimenticata nel cambio di
-priorità. Compare in Categoria A come voce aperta (**A5**).
-
-Questo documento è quindi completo su 6 sezioni su 7.
+**È stata eseguita il 10 agosto 2026** e il suo esito è ora in **A5**. Il
+documento copre tutte e sette le sezioni.
 
 ---
 
@@ -32,7 +30,7 @@ Questo documento è quindi completo su 6 sezioni su 7.
 |---|---|---|
 | 1 | Superficie di auth/autorizzazione, RLS riletto sullo schema reale | Chiusa — 2 difetti trovati e corretti (`profiles` scrivibile, `TRUNCATE` esente da RLS) |
 | 2 | Abuso e rate limiting, con cifra in dollari | **Parziale** — vettore B chiuso, **vettore A aperto** |
-| 3 | Audit delle dipendenze | **Mai eseguita** |
+| 3 | Audit delle dipendenze | Chiusa — 0 vulnerabilità in produzione, 1 solo dev |
 | 4 | Segreti sulla cronologia git completa | Chiusa — pulita, nessun segreto mai committato |
 | 5 | Leak di informazioni negli errori | Chiusa — zero leak su 28 scenari; 1 finding minore |
 | 6 | Esecuzioni sovrapposte del cron | Chiusa — corretta, **PR non ancora mergiata** |
@@ -191,19 +189,79 @@ riduce la resa di ogni account falso) ma non la chiude.
 
 ---
 
-## A5 🟠 L'audit delle dipendenze non è mai stato fatto
+## A5 🟢 Audit delle dipendenze — eseguito, nessun rischio di produzione
 
-**Origine**: sezione 3 · **Stato**: **mai eseguito**
+**Origine**: sezione 3 · **Stato**: **fatto** (10 agosto 2026)
 
-Nessun `npm audit`, nessun `pip-audit`, nessuna verifica di vulnerabilità note su
-`requirements.txt` e `frontend/package-lock.json`. Non c'è alcun risultato: non è
-"pulito", è **ignoto**.
+Perimetro concordato: solo high/critical, e solo se rilevanti per il codice
+**effettivamente eseguito** — un advisory su un pacchetto che non entra
+nell'immagine non ha lo stesso peso di uno su un parser che tocca input
+dell'utente.
 
-Il perimetro concordato era: solo high/critical, e solo se rilevanti per il
-codice effettivamente eseguito — un advisory su un pacchetto usato solo in build
-non ha lo stesso peso di uno su un parser che tocca input dell'utente.
+### I numeri
 
-**Pronta per un prompt diretto: SÌ.** È un'esecuzione, non una scelta.
+| Superficie | Pacchetti | Vulnerabilità |
+|---|---|---|
+| Frontend, `npm audit` su `package-lock.json` | **753** (424 prod, 292 dev, 90 optional) | **0** |
+| Backend **produzione**, `requirements.txt` risolto | **55** | **0** |
+| Backend venv reale (produzione + sviluppo) | **67** | **1** |
+
+Strumenti: `npm` 11.6.2 e `pip-audit` 2.10.1, quest'ultimo installato in un venv
+usa e getta e rimosso a fine lavoro — **non è una dipendenza del progetto**.
+Verificato dopo l'esecuzione che né `package-lock.json` né i `requirements` siano
+stati modificati: `npm audit` e `pip-audit` sono di sola lettura, ma su un
+lockfile appena riallineato per un problema di drift valeva la pena controllarlo
+invece di darlo per scontato.
+
+### Control group
+
+"Zero vulnerabilità" e "lo strumento non ha interrogato nulla" producono lo
+stesso output. Entrambi gli strumenti sono stati messi alla prova su versioni
+notoriamente vulnerabili:
+
+| Strumento | Esca | Rilevate |
+|---|---|---|
+| `npm audit` | `lodash@4.17.15`, `minimist@1.2.0` | 1 high + 1 critical |
+| `pip-audit` | `jinja2==2.10` | 6 |
+| `pip-audit` | `urllib3==1.26.4` | 12 |
+| `pip-audit` | `requests==2.19.0` | 23 |
+
+### Cross-check con una seconda fonte
+
+`pip-audit` interroga per difetto l'indice di PyPI. Rieseguito con `-s osv`
+(Open Source Vulnerabilities, database indipendente): **stesso esito su entrambe
+le superfici** — zero su `requirements.txt`, lo stesso unico finding sul venv.
+
+### L'unico finding, e perché è fuori perimetro
+
+**`pytest` 8.4.2** — `PYSEC-2026-1845`, alias `GHSA-6w46-j5rx-g56g` /
+`CVE-2025-71176`. Su UNIX pytest usa directory con il pattern
+`/tmp/pytest-of-{user}`, il che consente a un utente locale di causare un
+denial-of-service o forse di scalare privilegi. Corretto in **9.0.3**.
+
+Non è un rischio per Picox, per tre ragioni indipendenti:
+
+1. **Non entra in produzione.** `pytest` sta solo in `requirements-dev.txt`
+   (`pytest>=8.0,<9.0`), e il `Dockerfile` copia e installa **solo**
+   `requirements.txt` (righe 25–26). L'immagine non lo contiene.
+2. **Non si applica dove gira in locale.** Il pattern di path è specifico di
+   UNIX; qui la suite gira su Windows.
+3. **Non si applica dove gira in CI.** I job usano `ubuntu-latest`: runner
+   effimeri e a tenant singolo, dove "un altro utente locale" non esiste.
+
+Nessuna delle due fonti consultate fornisce un punteggio di severità per questo
+advisory — i campi disponibili sono `id`, `aliases`, `description`,
+`fix_versions`. Non ne invento uno: la valutazione qui sopra è sull'impatto
+descritto, non su un numero.
+
+> **Dettaglio da conoscere prima di dire "aggiorniamo e via":** la correzione è
+> in 9.0.3, che è **fuori** dal vincolo `pytest>=8.0,<9.0`. Aggiornare richiede
+> quindi di allargare deliberatamente il range e rieseguire la suite su un major
+> nuovo di pytest — non è un bump automatico. Vista l'assenza di impatto, la
+> raccomandazione è di **non farlo ora** e di lasciare che il vincolo si allarghi
+> quando ci sarà un motivo indipendente.
+
+**Azione richiesta: nessuna.**
 
 **Dipendenze**: nessuna.
 
@@ -496,7 +554,7 @@ gestione abbonamento: Stripe fa tutte e tre. Il lavoro vero è in **A1**, **A3**
 | A2 | Downgrade non retroattivo sui creator attivi | 7 (da 0004) | A | aperto (latente) | **no** — 3 opzioni | da stimare |
 | A3 | Vettore A — nessun rate limit su `analyze-video` | 2 | A | aperto | **no** — 3 opzioni | medio |
 | A4 | Rischio Sybil con più account | 2 | A | aperto | **no** — 4 opzioni | da stimare |
-| A5 | Audit delle dipendenze | 3 | A | **mai eseguito** | sì | basso |
+| A5 | Audit delle dipendenze | 3 | A | **fatto** — 0 in produzione, 1 solo dev fuori perimetro | n/d | — |
 | A6 | 500 fuori da `SafeRoute` senza header CORS | 5 | A | aperto | sì | basso |
 | A7 | Preflight CORS fuori dall'envelope | 5 | A | aperto | sì — *ma si raccomanda di non farlo* | basso |
 | A8 | `netloc` invece di `hostname` nella chiave di cache | 1 | A | aperto | sì | basso |
@@ -525,8 +583,7 @@ gestione abbonamento: Stripe fa tutte e tre. Il lavoro vero è in **A1**, **A3**
 
 # Ordine consigliato
 
-1. **A5** — l'audit delle dipendenze, perché è l'unica voce di cui non si conosce
-   nemmeno l'esito, e perché costa poco.
+1. ~~**A5**~~ — **fatto** il 10 agosto 2026: nessuna azione ne è derivata.
 2. **A1** — decidere dove vive lo stato di pagamento. È il collo di bottiglia:
    **A2** e in parte **A3** non vanno scritte prima.
 3. **A3** — il tetto di consumo sul percorso manuale. È il buco più grosso, e la
@@ -537,3 +594,6 @@ gestione abbonamento: Stripe fa tutte e tre. Il lavoro vero è in **A1**, **A3**
 6. **A9 + A10 (parte cache)** — dopo aver deciso quanto normalizzare.
 7. **A4** — la risposta al Sybil, che conviene decidere insieme al pricing.
 8. Solo allora la **Categoria B**, quando Stripe entrerà davvero.
+
+Con **A5** chiusa senza conseguenze, **A1** è la prima voce che richiede una tua
+decisione, e la prima da affrontare.

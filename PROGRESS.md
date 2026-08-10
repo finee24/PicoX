@@ -703,6 +703,63 @@ mai passato e nessuna variabile d'ambiente lo tocca: `app.debug` e
 gioco, misurata su un'app isolata: con `debug=True` la stessa eccezione produce
 **2.534 byte con traceback e password in chiaro** invece di 21.
 
+### ✅ RISOLTO — auto-promozione a `pro`, e il downgrade che non retroagiva
+
+Chiuso l'**11 agosto 2026**, migration `0006` e `0007`. Sono le voci **A1** e
+**A2** di `SECURITY_AUDIT.md`, affrontate insieme perché la seconda dipendeva
+dallo schema creato dalla prima.
+
+**A1 — il rischio era reale, e l'ho misurato prima di correggerlo.** La `0001`
+definiva su `profiles` una policy di UPDATE che copre l'intera riga; a reggere
+era il solo GRANT revocato dalla `0002`. Riprodotto sul progetto, in transazione
+poi annullata: come ruolo `authenticated`, con `grant update on public.profiles
+to authenticated`, l'auto-promozione a `pro` **riesce**. Senza quel gruppo di
+controllo la prova successiva sarebbe potuta essere verde solo perché l'utente
+non poteva scrivere comunque.
+
+Lo stato di pagamento vive ora in `public.subscriptions` e
+`profiles.subscription_tier` **è rimossa**, non deprecata: una colonna morta
+ricrea il rischio, perché scrivere in una colonna inutilizzata riesce sempre.
+Verificato prima di rimuoverla che nessun codice la leggesse *né* la scrivesse.
+
+Rieseguito l'attacco sullo schema applicato:
+
+| Tentativo | Esito |
+|---|---|
+| `update profiles set subscription_tier` con GRANT largo | **`42703`** — la colonna non esiste |
+| `update subscriptions set tier` con `GRANT UPDATE` | **`42501`** — serve anche `SELECT` per il `WHERE` |
+| `update subscriptions set tier` con **`GRANT ALL`** | **0 righe viste, 0 toccate** — RLS a zero policy |
+
+L'ultimo è il caso che conta: anche concedendo tutto per errore resta in piedi un
+secondo strato indipendente.
+
+**A2 — la disattivazione automatica.** Il criterio è
+`order by created_at desc, id desc`: si mantengono i più vecchi. È spiegabile in
+una frase, non dipende da `insights` (il cui segnale ha buchi: `ON DELETE SET
+NULL`, e un creator aggiunto ieri avrebbe zero insight), e lo spareggio su `id`
+rende l'ordine totale anche con `created_at` identici da inserimento in blocco.
+La disattivazione **non è distruttiva**: riga e insight restano.
+
+Prova end-to-end su utente usa e getta, poi eliminato:
+
+| Scenario | Esito |
+|---|---|
+| `pro` con 35 creator attivi → `free` | **30 attivi, 5 disattivati** |
+| Quali restano / quali escono | `creator_01…30` / `creator_31…35` |
+| Righe conservate | **35 su 35** |
+| Upgrade `free` → `pro` | nulla disattivato, nulla riattivato da sé |
+| Riattivazione da `pro`, poi nuovo downgrade | il riattivato è di nuovo il primo a uscire |
+
+**In più**: `creator_limit_for_tier(text)` porta i numeri del tetto in un posto
+solo, usata da entrambi i trigger. Senza, lo stesso `CASE` sarebbe esistito due
+volte — la divergenza segnalata come B3 nell'audit. Verificato in esercizio:
+`free → 30`, `pro → 200`, `null → 30`.
+
+> Le migration `0006` e `0007` **sono applicate** al progetto. Verificato dopo:
+> 2 righe migrate, colonna vecchia assente, entrambi i trigger abilitati,
+> `authenticated` senza alcun privilegio su `subscriptions`, RLS attivo con zero
+> policy. Utente di prova eliminato con verifica indipendente: **0 residui**.
+
 ### ⚠️ RISCHIO RESIDUO — attacco Sybil con più account
 
 Il tetto limita il danno di **un** account, non di molti. Chi registra N

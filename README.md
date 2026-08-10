@@ -328,8 +328,13 @@ erDiagram
     profiles {
         uuid id PK "FK auth.users, ON DELETE CASCADE"
         text email
-        text subscription_tier "free | pro"
         timestamptz created_at
+    }
+    subscriptions {
+        uuid user_id PK "FK auth.users, ON DELETE CASCADE"
+        text tier "free | pro"
+        timestamptz created_at
+        timestamptz updated_at
     }
     creators {
         uuid id PK
@@ -369,8 +374,12 @@ Estensione applicativa dell'utente, in relazione **1:1** con `auth.users`.
 | --- | --- | --- |
 | `id` | `uuid` | PK **e** FK → `auth.users(id)` `ON DELETE CASCADE` |
 | `email` | `text` | Copia denormalizzata da `auth.users`, nullable (signup via telefono) |
-| `subscription_tier` | `text` | `NOT NULL DEFAULT 'free'`, `CHECK IN ('free','pro')` |
 | `created_at` | `timestamptz` | `NOT NULL DEFAULT now()` |
+
+> `subscription_tier` **non è più qui**: la migration `0006` l'ha spostata in
+> `subscriptions.tier`. `profiles` contiene ciò che l'utente possiede e che un
+> giorno potrà modificare; il piano è ciò che l'utente non decide, e vive in una
+> tabella che non ha alcun motivo legittimo di essere scrivibile da un client.
 
 La primary key coincide con l'ID dell'account: nessuna colonna `user_id`
 separata, nessuna possibilità di profili orfani o duplicati.
@@ -383,6 +392,38 @@ con quelli del proprietario (`postgres`). Ha `search_path = ''` per prevenire
 search_path hijacking — vincolo che impone di qualificare ogni oggetto con lo
 schema — e usa `ON CONFLICT (id) DO NOTHING`, così un profilo già esistente non
 fa mai fallire il signup.
+
+#### `subscriptions`
+
+Stato di abbonamento, in relazione **1:1** con `auth.users`. Introdotta dalla
+migration `0006`.
+
+| Colonna | Tipo | Note |
+| --- | --- | --- |
+| `user_id` | `uuid` | PK **e** FK → `auth.users(id)` `ON DELETE CASCADE` |
+| `tier` | `text` | `NOT NULL DEFAULT 'free'`, `CHECK IN ('free','pro')` |
+| `created_at` | `timestamptz` | `NOT NULL DEFAULT now()` |
+| `updated_at` | `timestamptz` | `NOT NULL DEFAULT now()`, aggiornata dal trigger `set_subscriptions_updated_at` |
+
+**Nessun privilegio a `anon` e `authenticated`, nemmeno in lettura.** Non è una
+dimenticanza: oggi il piano non serve a nessuno lato client — il frontend non
+nomina piani in alcuna forma — e concedere una lettura che nessuno usa amplia la
+superficie in cambio di nulla. Quando servirà mostrarlo nell'interfaccia bastano
+un `grant select` e una policy di sola SELECT, entrambi già scritti in fondo alla
+`0006`.
+
+La scrittura resta preclusa **per costruzione**, non per configurazione: non
+esiste alcuna operazione legittima con cui un client possa modificare il proprio
+piano, quindi la tabella non ha bisogno di distinguere fra colonne modificabili e
+no — al contrario di `profiles`, dove ogni colonna sensibile richiederebbe di
+ricordarsi un trattamento a parte.
+
+**L'assenza della riga vale `free`.** `enforce_creator_limit` applica un
+`coalesce`, quindi il default sicuro non dipende dal fatto che qualcuno abbia
+ricordato di inserire una riga. `handle_new_user()` **non** è stata estesa di
+proposito: aggiungere un secondo insert al percorso di signup significherebbe un
+modo in più di far fallire una registrazione, quando l'assenza porta già allo
+stesso risultato.
 
 #### `creators`
 

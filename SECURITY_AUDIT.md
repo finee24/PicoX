@@ -34,7 +34,7 @@ documento copre tutte e sette le sezioni.
 | 4 | Segreti sulla cronologia git completa | Chiusa — pulita, nessun segreto mai committato |
 | 5 | Leak di informazioni negli errori | Chiusa — zero leak su 28 scenari; 1 finding minore |
 | 6 | Esecuzioni sovrapposte del cron | Chiusa — corretta, **PR non ancora mergiata** |
-| 7 | Readiness per il billing | Chiusa — raccomandazioni, nulla implementato |
+| 7 | Readiness per il billing | Chiusa — A1 e A2 poi corrette (`0006`, `0007`); il resto resta raccomandazione |
 
 ---
 
@@ -49,86 +49,148 @@ Va deciso ora, prima di aggiungere feature. Ogni voce porta due campi:
 
 ---
 
-## A1 🔴 Auto-promozione a `pro` appena qualcuno concederà un GRANT su `profiles`
+## A1 🟢 Auto-promozione a `pro` — **CHIUSA** (migration `0006`, 11 agosto 2026)
 
-**Origine**: sezione 7, radice nella sezione 1 · **Stato**: aperto
+**Origine**: sezione 7, radice nella sezione 1 · **Stato**: **fatto**
 
-La `0001` definisce `profiles_update_own`:
+### Il rischio era reale, ed è stato misurato prima di correggerlo
 
-```sql
-for update to authenticated
-  using ((select auth.uid()) = id)
-  with check ((select auth.uid()) = id);
+Non dedotto: riprodotto sul progetto, dentro una transazione poi annullata. Come
+ruolo `authenticated`, con `grant update on public.profiles to authenticated` e i
+claim JWT di un utente vero:
+
+```
+ruolo_effettivo: authenticated | tier_dopo_update: pro | auto_promozione_riuscita: true
 ```
 
-La policy consente di aggiornare **qualunque colonna** della propria riga,
-`subscription_tier` compresa. Oggi non fa danno solo perché la `0002` ha revocato
-il `GRANT`. Ma **RLS filtra righe, i GRANT filtrano colonne** — e la `0002` stessa
-documenta come riaprire, per il caso legittimo in cui si vorrà far modificare
-l'email:
+Senza questo gruppo di controllo, la prova successiva avrebbe potuto essere verde
+solo perché l'utente non poteva scrivere comunque.
 
-```sql
-grant update (email) on public.profiles to authenticated;
-```
+### La correzione, e la prova che tiene
 
-La forma naturale da digitare, il giorno in cui servirà, è
-`grant update on public.profiles to authenticated` — senza lista di colonne. In
-quel momento un `PATCH /rest/v1/profiles?id=eq.<il proprio uuid>` con
-`{"subscription_tier":"pro"}` funziona, e il trigger della `0004` concede subito
-200 creator attivi: **~$28/giorno di costo per account, gratuiti**.
+Lo stato di pagamento vive ora in `public.subscriptions`, e
+`profiles.subscription_tier` **è stata rimossa**, non deprecata. Rieseguito lo
+stesso attacco sullo schema applicato:
 
-Non è un bug attivo. È una mina posata su un percorso che verrà percorso.
+| Tentativo | Esito |
+|---|---|
+| `update profiles set subscription_tier` con `GRANT UPDATE` largo | **`42703`** — la colonna non esiste |
+| `update subscriptions set tier` con `GRANT UPDATE` | **`42501`** — un `UPDATE … WHERE` richiede anche `SELECT`, non concesso |
+| `update subscriptions set tier` con **`GRANT ALL`** | **0 righe viste, 0 toccate** — il RLS a zero policy filtra tutto |
 
-**Pronta per un prompt diretto: NO.** Le strade non sono equivalenti:
+L'ultimo caso è il più importante: anche concedendo *tutto* per errore, resta in
+piedi un secondo strato indipendente. `tier` è rimasto `free`.
 
-- **Opzione 1** — spostare lo stato di pagamento in una tabella `subscriptions`
-  separata, con zero privilegi di scrittura ad `authenticated`: la domanda «posso
-  concedere l'update?» non si porrà mai sulla tabella che contiene il diritto di
-  spendere.
-- **Opzione 2** — lasciarlo in `profiles` e difenderlo sulla colonna:
-  `revoke update (subscription_tier)` esplicito più un `WITH CHECK` che imponga
-  la colonna invariata anche a GRANT concesso.
-- **Opzione 3** — entrambe: spostare adesso, e mantenere comunque il `WITH CHECK`
-  su `profiles` per le colonne sensibili che vi si aggiungeranno in futuro.
+### Cosa contiene la `0006`
 
-**Dipendenze**: **A2 dipende da questa scelta.** Con l'opzione 1, il trigger
-`enforce_creator_limit` (`0004`) legge `public.profiles.subscription_tier` e va
-riscritto per leggere dalla nuova tabella — insieme a ogni fix di A2 scritto
-prima. Anche **A3** ne è toccata se la quota verrà parametrata sul piano.
+- `subscriptions` con FK verso **`auth.users`**, per coerenza con `creators`,
+  `insights` e `analysis_locks`; passare da `profiles` accoppierebbe due tabelle
+  applicative e aggiungerebbe un modo di fallire in cambio di nulla.
+- Migrazione dati **idempotente** (`on conflict do nothing`): rieseguirla dopo
+  che il billing avrà promosso qualcuno non lo retrocede. 2 righe migrate.
+- `enforce_creator_limit` riscritta **prima** del `drop column`: i corpi PL/pgSQL
+  non sono validati alla creazione ma all'esecuzione, quindi l'ordine inverso non
+  sarebbe fallito lì — sarebbe fallito al primo insert di un creator, in
+  produzione.
+- **Nessun privilegio** ad `anon` e `authenticated`, nemmeno `SELECT`: verificato
+  che oggi il piano non serva lato client. Le due righe per concederlo quando
+  servirà sono scritte in fondo alla migration.
+
+Verificato prima di rimuovere la colonna che **nessun codice la leggesse né la
+scrivesse**: `git grep subscription_tier` su `backend/` e `frontend/` → zero
+occorrenze.
+
+### Da dove veniva
+
+La `0001` definiva su `profiles` una policy di UPDATE che copriva l'intera riga
+(`profiles_update_own`, `using`/`with check` sul solo `auth.uid() = id`). A
+reggere era il solo `GRANT` revocato dalla `0002` — e la `0002` stessa documenta
+come riaprirlo, per il caso legittimo in cui si vorrà far modificare l'email.
+La forma naturale da digitare quel giorno,
+`grant update on public.profiles to authenticated` senza lista di colonne, avrebbe
+concesso 200 creator attivi a chiunque: ~$28 al giorno per account.
+
+Delle tre strade valutate — tabella separata, difesa sulla singola colonna, o
+entrambe — è stata scelta la **tabella separata**: difendere una colonna protegge
+quella colonna, e la prossima colonna sensibile richiederebbe di ricordarsene,
+senza che nulla segnali la dimenticanza. `subscriptions` non ha alcun motivo
+legittimo di essere scrivibile da un client, quindi la domanda non si pone — e
+non si porrà nemmeno per `status`, `current_period_end` e l'id cliente Stripe
+della Categoria B.
+
+**Dipendenza risolta**: A2 è stata scritta sopra questo schema, nello stesso
+branch, e `enforce_creator_limit` legge ora da `subscriptions`. **A3** resta
+toccata: se la quota di periodo verrà parametrata sul piano, leggerà da qui.
 
 ---
 
-## A2 🔴 Il downgrade non retroagisce: un ex-pagante continua a costare
+## A2 🟢 Il downgrade non retroagiva — **CHIUSA** (migration `0007`, 11 agosto 2026)
 
-**Origine**: sezione 7, derivata dalla `0004` della sezione 2 · **Stato**: aperto (latente)
+**Origine**: sezione 7, derivata dalla `0004` della sezione 2 · **Stato**: **fatto**
 
-`enforce_creator_limit` scatta solo su `INSERT` e sulla transizione `is_active`
-false→true. Un cambio di `subscription_tier` non tocca `creators`, quindi nessun
-trigger scatta; e `_load_active_creators` filtra su `is_active` senza guardare il
-piano.
+`enforce_creator_limit` scattava solo su `INSERT` e sulla transizione `is_active`
+false→true. Un cambio di piano non tocca `creators`, quindi nessun trigger
+scattava; e `_load_active_creators` filtra su `is_active` senza guardare il piano.
+Un `pro` con 150 creator attivi che tornava `free` (tetto 30) **ne manteneva 150
+attivi**, e il cron continuava a scraparli a ~$21/giorno per un utente che non
+paga più. Il tetto valeva per chi saliva, mai per chi scendeva.
 
-Un `pro` con 150 creator attivi che torna `free` (cap 30) **mantiene 150 creator
-attivi**, e il cron continua a scraparli a ~$21/giorno per un utente che non paga
-più.
+Delle tre strade — disattivare l'eccedenza, rifiutare il downgrade, accettare il
+costo — è stata scelta la **disattivazione automatica**. La terza è quella che si
+sceglie non decidendo, e la paga l'azienda; la seconda tiene in ostaggio chi
+vuole solo smettere di pagare.
 
-È **latente** oggi: senza billing nessuno fa downgrade, se non con un `UPDATE`
-manuale — che è però esattamente la procedura suggerita dalla `0004` per
-concedere un'eccezione a un cliente.
+### Il criterio: si mantengono i più vecchi
 
-**Pronta per un prompt diretto: NO.** È una decisione di prodotto prima che
-tecnica:
+`order by created_at desc, id desc` — i più recenti escono per primi.
 
-- **Opzione 1** — al downgrade disattivare automaticamente i creator più recenti
-  fino a rientrare nel cap.
-- **Opzione 2** — rifiutare o sospendere il downgrade finché l'utente non scende
-  da sé sotto il cap, notificandolo.
-- **Opzione 3** — accettare il costo e limitarsi a renderlo visibile, senza alcun
-  enforcement.
+È spiegabile in una frase («mantieni i primi 30 che hai aggiunto»), e un
+downgrade è un momento in cui ciò che succede deve essere anticipabile
+dall'utente e raccontabile da chi fa supporto senza interrogare il database. Non
+dipende da `insights`, l'unico segnale d'uso disponibile, che ha buchi reali:
+`ON DELETE SET NULL` fa perdere l'attribuzione, e un creator aggiunto ieri
+avrebbe zero insight — verrebbe scartato proprio mentre è la scelta più
+deliberata. Lo spareggio su `id` non è decorativo: un inserimento in blocco
+produce `created_at` identici, e senza spareggio due esecuzioni sugli stessi dati
+disattiverebbero creator diversi.
 
-Non decidere significa scegliere la 3.
+**La disattivazione non è distruttiva**: riga e insight storici restano, e
+l'utente può riattivare ciò che vuole disattivando altro. Il criterio non decide
+cosa si perde, decide da dove si riparte.
 
-**Dipendenze**: da **A1** (dove vive il piano determina dove si aggancia il
-trigger o il codice del downgrade). Da scrivere **dopo** A1, non prima.
+### Prova end-to-end, su utente usa e getta poi eliminato
+
+| Scenario | Esito |
+|---|---|
+| `pro` con **35** creator attivi → downgrade a `free` | **30 attivi, 5 disattivati** |
+| Quali restano | `creator_01`…`creator_30` — **i più vecchi** |
+| Quali escono | `creator_31`…`creator_35` — i più recenti |
+| Righe conservate | **35 su 35** — nulla è stato cancellato |
+| Upgrade `free` → `pro` | **nulla disattivato**, e nulla riattivato da sé: la scelta resta dell'utente |
+| Riattivazione da `pro`, poi nuovo downgrade | il creator riattivato è di nuovo il primo a uscire — il criterio è stabile |
+
+### Il tetto per piano vive ora in un posto solo
+
+`creator_limit_for_tier(text)` è usata sia da `enforce_creator_limit` sia dal
+trigger di downgrade. Senza, lo stesso `CASE` sarebbe esistito due volte: è
+esattamente la divergenza segnalata come **B3** — il giorno in cui i piani
+diventano tre, aggiornarne uno solo produce un database che concede ciò che
+l'applicazione nega, senza che nulla fallisca.
+
+Verificato in esercizio: `free → 30`, `pro → 200`, `null → 30`.
+
+### Cosa il trigger non copre, deliberatamente
+
+- **L'INSERT su `subscriptions`**: l'assenza della riga vale già `free`, il piano
+  più basso — inserirne una può solo alzare il tetto.
+- **Un futuro abbassamento dei numeri** in `creator_limit_for_tier`: nessun
+  `UPDATE` su `subscriptions` avviene, quindi nessun trigger scatta. La migration
+  che li cambierà dovrà fare da sé il rientro delle righe esistenti — annotato
+  dentro la funzione, perché chi cambierà quei numeri guarderà lì e non le note
+  di rilascio.
+- **La riattivazione oltre il tetto**: già coperta da `enforce_creator_limit`,
+  che **non interferisce** — il suo guard esce subito quando si sta disattivando.
+  Una funzione sorveglia chi sale, l'altra chi scende.
 
 ---
 
@@ -157,10 +219,11 @@ buona fede che consuma ordini di grandezza più di quanto versa.
 - **Opzione 3** — entrambi: finestra breve in-process contro i burst, quota di
   periodo nel database contro l'abuso sostenuto.
 
-**Dipendenze**: se la quota viene parametrata sul piano (probabile), dipende da
-**A1**. Il conteggio per periodo è anche il presupposto di **B4** (misurare i
-costi reali prima di fissare i prezzi): conviene che la stessa struttura serva a
-entrambi.
+**Dipendenze**: **A1 è chiusa**, quindi il blocco è rimosso — se la quota verrà
+parametrata sul piano, lo leggerà da `public.subscriptions` tramite
+`creator_limit_for_tier`, o da una funzione sorella costruita allo stesso modo.
+Il conteggio per periodo resta il presupposto di **B4** (misurare i costi reali
+prima di fissare i prezzi): conviene che la stessa struttura serva a entrambi.
 
 ---
 
@@ -550,8 +613,8 @@ gestione abbonamento: Stripe fa tutte e tre. Il lavoro vero è in **A1**, **A3**
 
 | # | Finding | Sezione | Cat. | Stato | Prompt diretto | Sforzo |
 |---|---|---|---|---|---|---|
-| A1 | Auto-promozione `subscription_tier` via futuro GRANT | 7 (radice 1) | A | aperto | **no** — 3 opzioni | basso–medio secondo l'opzione |
-| A2 | Downgrade non retroattivo sui creator attivi | 7 (da 0004) | A | aperto (latente) | **no** — 3 opzioni | da stimare |
+| A1 | Auto-promozione `subscription_tier` via futuro GRANT | 7 (radice 1) | A | **fatto** (`0006`) | n/d | — |
+| A2 | Downgrade non retroattivo sui creator attivi | 7 (da 0004) | A | **fatto** (`0007`) | n/d | — |
 | A3 | Vettore A — nessun rate limit su `analyze-video` | 2 | A | aperto | **no** — 3 opzioni | medio |
 | A4 | Rischio Sybil con più account | 2 | A | aperto | **no** — 4 opzioni | da stimare |
 | A5 | Audit delle dipendenze | 3 | A | **fatto** — 0 in produzione, 1 solo dev fuori perimetro | n/d | — |
@@ -584,16 +647,13 @@ gestione abbonamento: Stripe fa tutte e tre. Il lavoro vero è in **A1**, **A3**
 # Ordine consigliato
 
 1. ~~**A5**~~ — **fatto** il 10 agosto 2026: nessuna azione ne è derivata.
-2. **A1** — decidere dove vive lo stato di pagamento. È il collo di bottiglia:
-   **A2** e in parte **A3** non vanno scritte prima.
-3. **A3** — il tetto di consumo sul percorso manuale. È il buco più grosso, e la
-   struttura che serve è la stessa di **B4**.
-4. **A2** — la politica di downgrade, una volta deciso A1.
-5. **A8 + A10 (parte SSRF) + A11** — correzioni brevi e indipendenti, buone da
+2. ~~**A1**~~ e ~~**A2**~~ — **fatte** l'11 agosto 2026, migration `0006` e `0007`.
+3. **A3** — il tetto di consumo sul percorso manuale. È ora il buco più grosso
+   rimasto, e la struttura che serve è la stessa di **B4**.
+4. **A8 + A10 (parte SSRF) + A11** — correzioni brevi e indipendenti, buone da
    raggruppare in un solo giro.
-6. **A9 + A10 (parte cache)** — dopo aver deciso quanto normalizzare.
-7. **A4** — la risposta al Sybil, che conviene decidere insieme al pricing.
-8. Solo allora la **Categoria B**, quando Stripe entrerà davvero.
+5. **A9 + A10 (parte cache)** — dopo aver deciso quanto normalizzare.
+6. **A4** — la risposta al Sybil, che conviene decidere insieme al pricing.
+7. Solo allora la **Categoria B**, quando Stripe entrerà davvero.
 
-Con **A5** chiusa senza conseguenze, **A1** è la prima voce che richiede una tua
-decisione, e la prima da affrontare.
+Chiuse A1, A2 e A5, la prima voce che richiede una tua decisione è ora **A3**.

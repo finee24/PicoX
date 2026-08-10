@@ -44,6 +44,12 @@ os.environ.update(
         "GEMINI_API_KEY": "test-gemini-key",
         "APIFY_API_TOKEN": "test-apify-token",
         "CRON_SECRET": TEST_CRON_SECRET,
+        # Il cron è spento per difetto (`Settings.cron_enabled = False`): senza
+        # questa riga ogni test sul cron riceverebbe `503 cron_disabled` invece
+        # di esercitare il giro. Impostata qui e non in una fixture perché è una
+        # precondizione dell'ambiente, non una scelta del singolo test — quello
+        # che verifica la guardia la spegne da sé con `monkeypatch`.
+        "CRON_ENABLED": "true",
         "FRONTEND_URL": TEST_FRONTEND_URL,
         "BACKEND_URL": "http://localhost:8000",
     }

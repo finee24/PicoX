@@ -27,7 +27,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from app.core.config import Settings, get_settings
-from app.core.exceptions import AuthError
+from app.core.exceptions import AuthError, CronDisabledError
 from app.core.observability import bind_user_id
 
 logger = logging.getLogger(__name__)
@@ -157,6 +157,29 @@ async def verify_cron_secret(
     ):
         logger.warning("Chiamata al cron rifiutata: X-CRON-SECRET errato.")
         raise AuthError("Segreto del cron non valido.")
+
+
+async def verify_cron_enabled(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> None:
+    """Interruttore esplicito del job cron, spento per difetto.
+
+    **Va dichiarato dopo `verify_cron_secret`, non prima.** Le dipendenze di
+    router vengono valutate nell'ordine in cui sono elencate: invertendole,
+    chiunque senza segreto potrebbe sondare l'endpoint e dedurre lo stato di
+    configurazione dell'istanza dalla differenza fra `503 cron_disabled` e
+    `401`. Prima ci si autentica, poi si scopre che è spento.
+
+    Perché esiste: finché lo scheduler non è configurato, l'unica cosa che
+    impediva al cron di girare era una nota in `cron_config.md`. Una nota non è
+    una guardia — chi non la legge committa il workflow e scopre il problema dai
+    costi. Qui "non è ancora pronto" è vero per il codice.
+    """
+    if not settings.cron_enabled:
+        logger.warning(
+            "Chiamata al cron rifiutata: CRON_ENABLED non è attivo su questa istanza."
+        )
+        raise CronDisabledError()
 
 
 CurrentUser = Annotated[AuthenticatedUser, Depends(get_current_user)]

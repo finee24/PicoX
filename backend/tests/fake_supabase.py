@@ -400,6 +400,10 @@ _UNIQUE_CONSTRAINTS: dict[str, tuple[str, ...]] = {
     # doppio deve farla rispettare come il database, altrimenti i test sulla
     # concorrenza passerebbero per un motivo che in produzione non esiste.
     "analysis_locks": ("user_id", "video_url", "analysis_mode"),
+    # Stesso motivo, chiave singola: è `job_name` a garantire un giro di cron
+    # per volta. Senza questo vincolo nel doppio, due esecuzioni sovrapposte
+    # otterrebbero entrambe il lock e il test verde non direbbe nulla.
+    "job_locks": ("job_name",),
 }
 
 

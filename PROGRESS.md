@@ -732,28 +732,116 @@ $175 all'ora** per singolo account a seconda del modello dietro
 
 Da affrontare prima del lancio a pagamento, insieme al resto dell'audit.
 
-### ⚠️ PRIORITÀ MEDIA — due esecuzioni del cron sovrapposte duplicano lo scraping
+### ✅ RISOLTO — esecuzioni del cron sovrapposte, e il cron ora è spento per default
 
-Emerso dalla scansione dei pattern gemelli del 9 agosto 2026. **Solo segnalato,
-non corretto.**
+Chiuso il **10 agosto 2026**, migration `0005` + `job_locks`. Corrisponde alla
+sezione 6 dell'audit di readiness.
 
-`POST /api/v1/cron/check-updates` non ha alcuna guardia contro esecuzioni
-sovrapposte: due scheduler, o un retry che parte mentre il giro precedente è
-ancora in corso, enumerano entrambi i creator e chiamano entrambi
-`apify.fetch_latest_videos` (`cron.py:205`) — una chiamata esterna a pagamento,
-per ogni creator, senza deduplica in volo.
+**Prima però: il meccanismo non era quello che la voce originale descriveva.**
+Il cron non è invocato da nessuno scheduler interno — nessun APScheduler, niente
+fra le dipendenze — ed è un endpoint HTTP che **oggi nessuno chiama**:
+`render.yaml` definisce solo `type: web`, `.github/workflows/` contiene solo
+`backend-tests.yml`, e nessun workflow cron è mai esistito in storico. Il rischio
+era quindi interamente prospettico.
 
-La parte costosa a valle **è ora protetta**: le analisi accodate passano da
-`perform_analysis`, che prende il lock e ricontrolla la cache, quindi Gemini e
-il download non vengono pagati due volte. Resta scoperto lo scraping.
+**E la sorgente della sovrapposizione non era lo schedule.** La configurazione
+documentata usa già `concurrency: picox-cron`, che accoda un secondo giro
+schedulato. Era il **retry del client**: `curl --max-time 120 --retry 2`
+abortiva e ri-POSTava se il censimento superava i 120s, mentre il server stava
+ancora elaborando — stessa run, stesso gruppo di concorrenza, nessuna guardia. E
+il censimento era sequenziale con `APIFY_TIMEOUT_SECONDS = 180`: al tetto di 30
+creator attivi bastavano ~4s a creator per sfondare la soglia, cioè il
+funzionamento normale di un account pieno.
 
-Nota collegata: `_filter_already_analyzed` (`cron.py:84`) è un check-then-act —
-legge quali URL hanno già un insight e poi accoda — ma la finestra che apriva è
-adesso chiusa dal lock, per la stessa ragione.
+**Baseline misurata**, due POST concorrenti con Apify mockato:
 
-Un secondo effetto, minore: ogni esecuzione ha il proprio
-`asyncio.Semaphore(cron_max_concurrent_analyses)`, quindi due giri sovrapposti
-possono raddoppiare il parallelismo rispetto al limite configurato.
+| Misura | Atteso | Prima | Dopo |
+|---|---|---|---|
+| `fetch_latest_videos` con 3 creator | 3 | **6** | **3** |
+| Esecuzioni che saltano il giro | 1 | **0** | **1**, con `WARNING` |
+| Picco di analisi in volo (limite 2) | ≤ 2 | **4** | **2** |
+| Righe duplicate in `insights` | 0 | 0 | 0 |
+
+L'ultima riga è ciò che ha guidato il design: `analysis_locks` della sezione 2
+**proteggeva già** tutta la fase costosa a valle. Il danno residuo era confinato
+al censimento e al semaforo.
+
+**La correzione, in quattro pezzi.**
+
+1. **`job_locks`** (`0005`): lock a scadenza con chiave `job_name`, stesso
+   meccanismo a due passi atomici della `0003`. Chi arriva mentre un giro è in
+   corso **salta** — `200` con `"skipped": true` e un `WARNING` — invece di
+   attendere: un cron che si accoda è peggio di uno che perde un giro.
+   La chiave è un nome di job e non "il cron" di proposito: un secondo job
+   futuro passa il proprio nome, senza migration né moduli nuovi.
+2. **Il lock copre anche il background.** `BackgroundTasks` disaccoppia la
+   risposta dal lavoro: la `200` parte a fine censimento mentre le analisi
+   proseguono per minuti. Il rilascio vive in `_esegui_e_rilascia`, non nella
+   route. TTL 1800s — qui **non** è un vincolo di correttezza come nella `0003`
+   ma il limite di quanto si accetta di restare fermi per un processo morto: sta
+   sopra un giro realistico e sotto lo schedule di 6h di un fattore 12.
+3. **Semaforo per event loop**, non per esecuzione: `CRON_MAX_CONCURRENT_ANALYSES`
+   ora significa quello che il nome dice. Indicizzato sul loop e non in una
+   variabile singola perché un `asyncio.Semaphore` si lega al loop al primo
+   `await` — con un singleton globale il modulo diventa inutilizzabile da
+   qualunque contesto che crei un loop proprio, ed è così che il difetto è
+   emerso nei test.
+4. **Censimento parallelo** (`CRON_CENSUS_CONCURRENCY = 6`): al tetto di 30
+   creator il caso tipico scende da ~120s a ~20s e il pessimo da 5.400s a ~900s.
+   È la leva strutturale — alzare solo il timeout avrebbe lasciato il censimento
+   lineare nel numero di creator.
+
+**`cron_config.md` corretto insieme al codice**: `--retry` rimosso (ritentare una
+POST costosa e non idempotente era la causa prima), `--max-time` da 120 a 300,
+gestione di `skipped` nello script, e l'avvertenza che il Render Cron Job non ha
+un equivalente di `concurrency` — è il lock a garantire un giro per volta, non
+lo scheduler.
+
+**La guardia: `CRON_ENABLED`, spento per difetto.** Prima l'unica cosa che
+impediva al cron di girare rotto era una nota in un file di documentazione. Ora
+`check-updates` risponde `503 cron_disabled` finché non lo si accende
+deliberatamente in `render.yaml`. La dipendenza è dichiarata **dopo**
+`verify_cron_secret`: invertendole, chiunque senza segreto dedurrebbe lo stato
+di configurazione dell'istanza dalla differenza fra `503` e `401`.
+
+**Prove** (`tests/test_concorrenza_cron.py`, 10 test):
+
+| Prova | Esito |
+|---|---|
+| Due giri sovrapposti | 1 solo censimento, 1 solo giro effettivo |
+| Il salto è visibile | `WARNING` con "giro saltato", non `INFO` |
+| Parallelismo | picco entro il limite configurato |
+| Lock durante il background | un secondo giro lanciato **da dentro** l'analisi viene respinto |
+| Rilascio a fine background | `job_locks` vuota dopo la risposta |
+| Rilascio su giro a vuoto | `job_locks` vuota anche senza analisi da accodare |
+| Crash a metà giro (lock scaduto) | il giro successivo riparte, con `WARNING` di sottrazione |
+| Lock ancora valido (controllo) | il giro si ferma — prova che la scadenza è davvero valutata |
+| `CRON_ENABLED=false` | `503 cron_disabled`, nessuno scraping, nessun lock preso |
+| Segreto assente o errato + cron spento | `401`, mai `cron_disabled` |
+
+**Scansione dei pattern gemelli: nessuno.** `cron.py` è l'unico endpoint che usa
+`BackgroundTasks`; non esistono webhook, worker, `asyncio.create_task` o
+scheduler interni. L'altro trigger ripetibile costoso è `analyze-video`, già
+protetto da `analysis_locks`, il cui problema aperto è il rate limit (vettore A)
+— che è un problema di volume, non di sovrapposizione.
+
+> ⚠️ **La migration `0005` non è applicata al database.** Va applicata **prima**
+> di portare `CRON_ENABLED` a `true`: senza la tabella, ogni giro fallirebbe
+> nell'acquisizione del lock. Finché il cron resta spento non serve nulla.
+
+### ~~⚠️ PRIORITÀ MEDIA — due esecuzioni del cron sovrapposte~~ → superata
+
+Emersa dalla scansione dei pattern gemelli del 9 agosto 2026, **chiusa il 10
+agosto** dalla voce qui sopra. Si conserva perché due sue affermazioni si sono
+rivelate imprecise, e sapere *come* è utile quanto sapere che il difetto c'era:
+
+* diceva «due scheduler, o un retry»: la misura ha mostrato che gli scheduler
+  non c'entravano — nessuno chiamava l'endpoint, e la configurazione documentata
+  accodava già i giri schedulati. Era **solo** il retry;
+* la trattava come priorità media *attiva*, mentre il rischio era prospettico.
+
+Restano valide e non modificate le osservazioni sui pattern **sani** verificati
+allora, che il fix non ha toccato:
 
 Pattern controllati e **risultati sani**: `creators.py:68` è un `insert` con
 vincolo `UNIQUE` tradotto in `409`, non un last-writer-wins; `update_creator`

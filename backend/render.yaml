@@ -57,6 +57,21 @@ services:
       - key: PYTHON_VERSION
         value: "3.11"
 
+      # --- Job cron ------------------------------------------------------
+      # SPENTO DI PROPOSITO. Nessuno scheduler è ancora configurato: finché
+      # questa resta `false`, `POST /api/v1/cron/check-updates` risponde
+      # `503 cron_disabled` anche con il segreto corretto.
+      #
+      # Prima esisteva solo una nota in `app/cron_config.md` che diceva di non
+      # attivarlo. Una nota non è una guardia: chi non la legge committa il
+      # workflow e scopre il problema dai costi. Portarla a `true` è una
+      # modifica deliberata, visibile in diff e in code review.
+      #
+      # Da fare PRIMA di accenderlo: applicare la migration `0005_job_locks`,
+      # e configurare lo scheduler come descritto in `app/cron_config.md`.
+      - key: CRON_ENABLED
+        value: "false"
+
       # --- Supabase ------------------------------------------------------
       # `sync: false` = Render chiede il valore al primo deploy e lo conserva
       # cifrato. Nessun segreto entra in questo file, che è versionato.

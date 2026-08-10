@@ -89,3 +89,12 @@ class CronRunResponse(BaseModel):
     failed_creators: int = Field(description="Creator per cui lo scraping è fallito.")
     queued_analyses: int = Field(description="Analisi accodate in background.")
     results: list[CronCreatorResult] = Field(description="Dettaglio per creator.")
+    skipped: bool = Field(
+        default=False,
+        description=(
+            "`true` se il giro è stato saltato perché un'altra esecuzione era già "
+            "in corso. Non è un errore: la risposta resta 200 perché lo scheduler "
+            "ha fatto il suo lavoro correttamente, e ritentare peggiorerebbe le "
+            "cose. Gli altri contatori sono a zero."
+        ),
+    )

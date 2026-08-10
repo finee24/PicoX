@@ -60,6 +60,25 @@ class Settings(BaseSettings):
     backend_url: str = "http://localhost:8000"
     cron_secret: SecretStr
 
+    # --- Job cron ------------------------------------------------------------
+    # Interruttore esplicito, spento per difetto. Senza, "il cron non è ancora
+    # pronto" era vero solo per un commento in `cron_config.md`: chi non l'avesse
+    # letto avrebbe committato lo scheduler e l'avrebbe scoperto dai costi.
+    # Accenderlo è una modifica deliberata e visibile in diff.
+    cron_enabled: bool = False
+    # Durata del lock su un giro di cron. **Non è la durata massima di un giro**
+    # — quella, nel caso pessimo, è di decine di ore — ma il limite di quanto
+    # accettiamo di restare fermi per un processo morto a metà. Sta sopra un
+    # giro realistico completo e sotto lo schedule di 6h di un fattore 12: se
+    # scade durante un giro lungo si torna al comportamento precedente, non a
+    # qualcosa di peggio, perché le analisi restano protette da `analysis_locks`.
+    cron_lock_ttl_seconds: int = Field(default=1800, ge=60)
+    # Creator scrapati in parallelo durante il censimento. Con il ciclo
+    # sequenziale, al tetto di 30 creator attivi il censimento tipico sfiorava i
+    # 120s — la soglia oltre la quale il client abortiva e ritentava, che era la
+    # sorgente vera delle esecuzioni sovrapposte.
+    cron_census_concurrency: int = Field(default=6, ge=1)
+
     # --- Limiti di ingestione video -----------------------------------------
     max_video_mb: int = Field(default=200, ge=1)
     max_video_duration_seconds: int = Field(default=600, ge=1)

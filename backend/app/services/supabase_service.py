@@ -71,9 +71,11 @@ _SCOPE_COLUMN: Final[dict[str, str]] = {
 
 # Tabelle su cui è ammessa una query service-role non filtrata per utente.
 # `creators` c'è perché il cron deve enumerare i creator attivi di tutti i
-# tenant e non ha un utente corrente da cui derivare il filtro. `insights` non
-# c'è, e non deve entrarci: lì una query non scopata è una fuga di dati.
-_UNSCOPED_ALLOWED: Final[frozenset[str]] = frozenset({"creators"})
+# tenant e non ha un utente corrente da cui derivare il filtro. `job_locks` c'è
+# perché è coordinamento fra processi: non contiene dati di alcun utente e non
+# ha una colonna su cui scopare. `insights` non c'è, e non deve entrarci: lì una
+# query non scopata è una fuga di dati.
+_UNSCOPED_ALLOWED: Final[frozenset[str]] = frozenset({"creators", "job_locks"})
 
 _service_client: AsyncClient | None = None
 _service_client_lock = asyncio.Lock()

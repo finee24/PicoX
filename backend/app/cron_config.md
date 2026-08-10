@@ -5,6 +5,34 @@ qualcuno lo chiami. È una scelta, non una mancanza — un processo che dorme
 dentro il web server muore a ogni deploy, non lascia traccia di cosa ha fatto e
 non è invocabile a mano quando serve.
 
+## Prima di tutto: il cron è spento
+
+`CRON_ENABLED` è `false` per difetto. Finché resta così, `check-updates`
+risponde **`503 cron_disabled`** anche con il segreto corretto — non è un
+guasto, è una guardia.
+
+Esisteva solo una nota in questo file che diceva di non attivare lo scheduler.
+Una nota non è una guardia: chi non la legge committa il workflow e scopre il
+problema dai costi. Ora "il cron non è ancora pronto" è vero per il codice.
+
+Da fare, in quest'ordine, prima di accenderlo:
+
+1. applicare la migration `supabase/migrations/0005_job_locks.sql`, senza la
+   quale ogni giro fallisce nell'acquisizione del lock;
+2. configurare lo scheduler come descritto sotto;
+3. **solo allora** portare `CRON_ENABLED` a `true` in `render.yaml`.
+
+## Un giro per volta
+
+Il backend rifiuta le esecuzioni sovrapposte da sé, con un lock a scadenza su
+`job_locks` (`CRON_LOCK_TTL_SECONDS`, 1800s). Chi arriva mentre un altro giro è
+in corso **salta**: risposta `200` con `"skipped": true`, contatori a zero, e un
+`WARNING` nei log. Non è un errore e **non va ritentato** — accodare i giri è
+peggio che perderne uno, perché la finestra successiva arriva comunque.
+
+Il lock copre anche le analisi in background, non solo il censimento, e scade da
+sé: un processo ucciso a metà deploy non blocca il giro successivo.
+
 ## Il contratto
 
 ```http
@@ -15,9 +43,9 @@ X-CRON-SECRET: <CRON_SECRET>
 | | |
 |---|---|
 | **Autenticazione** | Solo l'header `X-CRON-SECRET`. Nessun JWT: non c'è un utente, il giro riguarda i creator di *tutti* gli account. Il confronto è a tempo costante (`hmac.compare_digest`). |
-| **Risposta** | `200` con il riepilogo per creator. `401` se il segreto manca o è errato. `503` se il database non risponde. |
-| **Durata** | Breve. L'endpoint risponde appena finito il censimento; le analisi vere proseguono in background dopo l'invio della risposta. |
-| **Idempotenza** | Sì. Il dedup è su `(user_id, video_url)`: rilanciarlo non produce analisi doppie né costi doppi. Se un giro salta, il successivo recupera. |
+| **Risposta** | `200` con il riepilogo per creator, o `200` con `"skipped": true` se un altro giro è già in corso. `401` se il segreto manca o è errato. `503` se il database non risponde o se `CRON_ENABLED` è `false` (`cron_disabled`). |
+| **Durata** | L'endpoint risponde appena finito il censimento; le analisi proseguono in background. Il censimento scrapa fino a `CRON_CENSUS_CONCURRENCY` creator in parallelo (6): al tetto di 30 creator attivi sono ~20s tipici, ~900s nel caso pessimo. Era sequenziale, e lì il caso tipico sfiorava i 120s. |
+| **Idempotenza** | Sì, e su due livelli: il dedup è su `(user_id, video_url)`, e il lock su `job_locks` impedisce che due giri concorrenti scrapino gli stessi creator. Se un giro salta, il successivo recupera. |
 
 Esempio di risposta:
 
@@ -95,9 +123,22 @@ jobs:
           # finiscono nei log di ogni proxy attraversato.
           # --fail-with-body: esce non-zero sugli status >= 400 mostrando però
           # il corpo, altrimenti l'errore arriva senza il motivo.
+          #
+          # NIENTE --retry SU QUESTA POST. Era `--retry 2 --retry-delay 30` con
+          # `--max-time 120`, ed era la sorgente vera delle esecuzioni
+          # sovrapposte: superati i 120s curl abortiva e ri-POSTava mentre il
+          # server stava ancora elaborando la prima richiesta. Il `concurrency`
+          # qui sopra non copre quel caso, perché avviene dentro la stessa run.
+          # Oggi il lock lo intercetterebbe comunque, ma ritentare una POST
+          # costosa e non idempotente resta la cosa sbagliata da fare: se un
+          # giro fallisce, il successivo recupera.
+          #
+          # --max-time 300 e non 120: al tetto di 30 creator attivi un censimento
+          # sano sta sotto i 30s, ma il caso pessimo — Apify lento su piu'
+          # creator — arriva a ~900s. 300s abortisce solo quando c'e' davvero
+          # qualcosa che non va, invece che a ogni giro un po' carico.
           curl --silent --show-error --fail-with-body \
-               --max-time 120 \
-               --retry 2 --retry-delay 30 --retry-connrefused \
+               --max-time 300 \
                -X POST "${BACKEND_URL}/api/v1/cron/check-updates" \
                -H "X-CRON-SECRET: ${CRON_SECRET}" \
                -H "Content-Type: application/json" \
@@ -107,6 +148,9 @@ jobs:
           python3 -c "
           import json, sys
           d = json.load(open('risposta.json'))
+          if d.get('skipped'):
+              print('Giro saltato: un altro era gia in corso. Non e un errore.')
+              sys.exit(0)
           print(f\"creator controllati: {d['checked_creators']}\")
           print(f\"analisi accodate:    {d['queued_analyses']}\")
           falliti = d['failed_creators']
@@ -148,7 +192,7 @@ In `render.yaml`, come servizio aggiuntivo:
     region: frankfurt
     schedule: "17 */6 * * *"
     dockerCommand: >
-      sh -c "curl --silent --show-error --fail-with-body --max-time 120
+      sh -c "curl --silent --show-error --fail-with-body --max-time 300
              -X POST \"$BACKEND_URL/api/v1/cron/check-updates\"
              -H \"X-CRON-SECRET: $CRON_SECRET\""
     envVars:
@@ -168,6 +212,12 @@ In `render.yaml`, come servizio aggiuntivo:
 
 I Cron Job su Render sono a pagamento anche sui piani base — è il compromesso
 in cambio dell'assenza di segreti duplicati.
+
+⚠️ A differenza di GitHub Actions, qui **non c'è un equivalente documentato di
+`concurrency`**: se un giro dura più dello schedule, il comportamento di Render
+sulle esecuzioni accavallate non è qualcosa su cui contare. È il lock su
+`job_locks` a garantire un giro per volta, non lo scheduler — motivo in più per
+non trattarlo come una rete di sicurezza opzionale.
 
 ---
 

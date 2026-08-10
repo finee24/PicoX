@@ -94,6 +94,28 @@ class AnalysisInProgressError(PicoxError):
     )
 
 
+class CronDisabledError(PicoxError):
+    """Il job cron non è abilitato su questa istanza.
+
+    503 e non 404: l'endpoint esiste ed è configurato correttamente: è
+    l'istanza a non essere pronta a servirlo. Un 404 manderebbe chi configura lo
+    scheduler a cercare un errore di routing o di versione dell'API, cioè a
+    indagare il problema sbagliato.
+
+    Il messaggio nomina la variabile da impostare di proposito: qui il
+    destinatario non è un utente finale ma chi sta configurando il deploy, e
+    `CRON_ENABLED` non è un segreto né un dettaglio implementativo — è
+    documentata in `render.yaml` e in `cron_config.md`.
+    """
+
+    status_code = 503
+    code = "cron_disabled"
+    default_message = (
+        "Il job cron non è abilitato su questa istanza. Impostare CRON_ENABLED=true "
+        "dopo aver verificato che lo scheduler sia configurato correttamente."
+    )
+
+
 class PicoxValidationError(PicoxError):
     """Input non valido: body malformato, video oltre i limiti consentiti."""
 

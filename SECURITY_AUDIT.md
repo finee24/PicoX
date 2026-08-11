@@ -561,7 +561,9 @@ asserisce prima che la vecchia funzione desse due chiavi diverse. Coperti anche 
 casi che **non** devono collassare — il rischio speculare è fondere video
 distinti — l'idempotenza, e la garanzia che la chiave resti un URL navigabile.
 
-### Punto 2 — i link brevi: non risolti, e perché
+### Punto 2 — i link brevi: non risolti, **registrato come voce a sé**
+
+Voce a priorità bassa in `PROGRESS.md`. Nessun codice scritto.
 
 **Raccomandazione: restare offline.** Risolverli con una `HEAD` metterebbe una
 chiamata di rete nel percorso della **chiave di cache**, quindi su *ogni*
@@ -710,6 +712,20 @@ indipendenti: non è nel `PATH` di bash né di PowerShell, il servizio
 `com.docker.service` non esiste, e Docker Desktop non è presente nei percorsi di
 installazione standard. Non è un problema del `docker-compose.yml`: è l'assenza
 dello strumento con cui provarlo.
+
+**Verifica statica eseguita l'11 agosto 2026** (dichiarata tale: nulla è stato
+costruito né eseguito). Nome del pacchetto `ffmpeg` corretto e fornisce
+`ffprobe`, verificato sulla documentazione Debian; ordine dei layer corretto
+(dipendenze prima del codice); `apt-get update`/`install`/pulizia nello stesso
+`RUN`; `chown` dopo la copia e `USER` non privilegiato.
+
+**Un difetto trovato**: `python:3.11-slim` **non pinna la suite Debian**, e quel
+tag mappa oggi su **trixie** mentre fino a poco fa era bookworm — `ffmpeg` passa
+da 5.1 a 7.1 senza che nulla nel repository lo dichiari. Il Dockerfile non è
+rotto (il pacchetto esiste su entrambe), ma per un progetto la cui unica ragione
+di usare Docker è «serve `ffmpeg`», un cambio di major del binario dovrebbe
+essere una decisione. Correzione: una riga, `python:3.11-slim-trixie`. **Non
+applicata**: cambia l'immagine di produzione.
 
 **Cosa serve per chiuderla**: installare Docker Desktop e rieseguire la verifica —
 build, presenza e funzionamento di `ffmpeg`/`ffprobe` dentro il container, `/health`

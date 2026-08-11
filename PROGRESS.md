@@ -935,6 +935,28 @@ valore mostrato: colonna nuova, `UNIQUE` spostato, migration con backfill. È un
 modifica di schema, non di normalizzazione — **decisione aperta**, e oggi costa
 quanto non costerà mai più: 1 riga in `insights`.
 
+### ⚠️ PRIORITÀ BASSA — i link brevi non sono risolti (A9, punto 2)
+
+`vm.tiktok.com/ZMabc` e l'URL completo dello stesso video restano **due chiavi
+di cache distinte**: chi incolla il link breve paga un'analisi che esiste già.
+
+**Non risolto di proposito.** Una richiesta `HEAD` dentro `normalize_video_url`
+metterebbe una chiamata di rete nel percorso della chiave di cache, quindi su
+*ogni* richiesta — compresi i cache hit, che oggi non costano nulla — con i suoi
+timeout e i suoi fallimenti. E la funzione è oggi pura e sincrona, chiamata in
+cima a `perform_analysis`: renderla `async` e fallibile ne cambia il contratto
+ovunque.
+
+**La via migliore non richiede alcuna richiesta aggiuntiva.** Apify **risolve
+già** il link breve e restituisce l'URL canonico in `ScrapedVideo.video_url`:
+basterebbe ri-chiavare l'insight su quello **dopo** lo scraping, invece che
+sull'URL in ingresso. Tocca però `perform_analysis` e il lock — il lock viene
+preso *prima* di sapere l'URL risolto — quindi è un intervento a sé, non un
+dettaglio di A9.
+
+Da valutare insieme alla canonicalizzazione su ID (A9 punto 3): le due cose
+condividono la stessa domanda, cioè quale valore sia la chiave.
+
 ### ⏸️ A13 — verifica di `docker compose` **non eseguibile**
 
 Tentata l'11 agosto 2026. **Docker non è installato**, verificato su tre vie
@@ -946,6 +968,35 @@ Conta più di quanto sembri: `render.yaml` usa `runtime: docker` con lo stesso
 `Dockerfile`, e la ragione dichiarata è che senza `ffmpeg` la durata del video
 non sarebbe verificabile e `MAX_VIDEO_DURATION_SECONDS` non verrebbe applicata.
 Quella catena non è mai stata provata end-to-end.
+
+#### Verifica **statica** del Dockerfile, 11 agosto 2026
+
+**Non sostituisce la verifica end-to-end**: nulla è stato costruito né eseguito.
+Si è controllato ciò che si può controllare leggendo.
+
+| Controllo | Esito |
+|---|---|
+| Nome del pacchetto `ffmpeg` | corretto, e **fornisce `ffprobe`** — verificato sulla documentazione Debian, non a memoria |
+| Ordine dei layer | corretto: `requirements.txt` copiato e installato **prima** del codice, quindi la cache delle dipendenze non si invalida a ogni modifica |
+| `apt-get` | `update`, `install` e `rm -rf /var/lib/apt/lists/*` nello **stesso** `RUN`: nessun layer con la cache apt dentro l'immagine |
+| Permessi | `chown -R` su `/app` **dopo** `COPY . .`, poi `USER picox`: la proprieta' e' corretta e il processo non gira da root |
+
+**Un difetto trovato: l'immagine base non e' pinnata, e la distro e' gia'
+cambiata.** `python:3.11-slim` non fissa la suite Debian, e oggi quel tag mappa
+su **trixie** (Debian 13) mentre fino a poco fa era bookworm (Debian 12). Il
+pacchetto `ffmpeg` esiste su entrambe e fornisce `ffprobe` — quindi **il
+Dockerfile non e' rotto** — ma la versione di ffmpeg passa da 5.1 a 7.1 senza
+che nulla nel repository lo dichiari.
+
+Per un progetto in cui la ragione stessa di usare Docker e' «serve `ffmpeg`»,
+un cambio di major del binario che giustifica l'immagine merita di essere una
+decisione, non un effetto collaterale. La correzione e' una riga
+(`python:3.11-slim-trixie`), ma **cambia l'immagine di produzione**: non la
+applico in questo giro.
+
+**Nota minore, non un difetto**: `chown -R` riscrive i metadati di ogni file e
+duplica il layer di `/app`. `COPY --chown=picox:picox . .` lo eviterebbe, al
+prezzo di creare l'utente prima della copia. Irrilevante a questa dimensione.
 
 ### ⚠️ RISCHIO RESIDUO — attacco Sybil con più account
 

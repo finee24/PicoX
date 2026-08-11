@@ -170,6 +170,12 @@ async def _run_job(
             apify=apify,
             creator_id=job.creator_id,
             scraped=job.scraped,
+            # Il cron non consuma la quota manuale dell'utente: ha gia' il
+            # proprio budget, imposto dal tetto ai creator attivi. Due budget
+            # indipendenti, ognuno con un proprietario chiaro — altrimenti un
+            # giro notturno azzererebbe le analisi che l'utente puo' fare di
+            # giorno, senza che nulla glielo spieghi.
+            conta_quota=False,
         )
         logger.info(
             "Cron: analisi %s per il creator %s (%s)",

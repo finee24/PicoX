@@ -49,7 +49,12 @@ from postgrest.exceptions import APIError
 from supabase import AsyncClient, AsyncClientOptions, acreate_client
 
 from app.core.config import Settings, get_settings
-from app.core.exceptions import ConflictError, DatabaseError, PlanLimitError
+from app.core.exceptions import (
+    AnalysisQuotaError,
+    ConflictError,
+    DatabaseError,
+    PlanLimitError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +65,10 @@ _FOREIGN_KEY_VIOLATION: Final = "23503"
 # Non è uno standard Postgres: è uno spazio riservato a noi, così un limite di
 # piano non si confonde con un guasto del database.
 _PLAN_LIMIT: Final = "PX001"
+# Sollevato da `enforce_analysis_quota` (migration 0008). Distinto da PX001
+# di proposito: sono due limiti di piano diversi, e il client deve poterli
+# distinguere per dire la cosa giusta all'utente.
+_ANALYSIS_QUOTA: Final = "PX002"
 
 # `profiles` è scopata sulla PK, non su una colonna `user_id`.
 _SCOPE_COLUMN: Final[dict[str, str]] = {
@@ -67,6 +76,7 @@ _SCOPE_COLUMN: Final[dict[str, str]] = {
     "creators": "user_id",
     "insights": "user_id",
     "analysis_locks": "user_id",
+    "analysis_events": "user_id",
 }
 
 # Tabelle su cui è ammessa una query service-role non filtrata per utente.
@@ -284,6 +294,10 @@ def translate_postgrest_error(exc: APIError, *, context: str) -> Exception:
     if code == _FOREIGN_KEY_VIOLATION:
         logger.info("Violazione di foreign key (%s): %s", context, exc.message)
         return ConflictError("Riferimento a una risorsa inesistente.")
+
+    if code == _ANALYSIS_QUOTA:
+        logger.info("Quota giornaliera di analisi esaurita (%s): %s", context, exc.message)
+        return AnalysisQuotaError()
 
     if code == _PLAN_LIMIT:
         # Senza questo ramo il limite di piano finirebbe nel caso generico qui

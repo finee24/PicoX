@@ -425,6 +425,37 @@ proposito: aggiungere un secondo insert al percorso di signup significherebbe un
 modo in più di far fallire una registrazione, quando l'assenza porta già allo
 stesso risultato.
 
+#### `analysis_events`
+
+Una riga per analisi **manuale avviata**. Introdotta dalla migration `0008`.
+
+| Colonna | Tipo | Note |
+| --- | --- | --- |
+| `id` | `uuid` | PK, `DEFAULT gen_random_uuid()` |
+| `user_id` | `uuid` | FK → `auth.users(id)` `ON DELETE CASCADE` |
+| `video_url` | `text` | `NOT NULL` |
+| `analysis_mode` | `text` | `CHECK IN ('INFO','STYLE','BOTH')` |
+| `created_at` | `timestamptz` | `NOT NULL DEFAULT now()`; è la colonna su cui si conta la quota del giorno, in **UTC** |
+
+**Avviata, non completata.** La riga viene scritta nel momento in cui la spesa è
+decisa — dentro il lock, dopo i controlli di cache — quindi comprende anche le
+analisi che pagano Apify e poi falliscono su Gemini, che **non lasciano alcuna
+riga in `insights`**. Contare gli insight avrebbe sottostimato proprio l'abuso
+che genera errori.
+
+Il trigger `analysis_events_enforce_quota` rifiuta l'inserimento oltre
+`analysis_limit_for_tier(tier)` analisi nel giorno corrente, sollevando `PX002`
+che il backend traduce in `409 analysis_quota_reached`. **L'arbitro è il
+database**: due richieste concorrenti al tetto non possono superarlo entrambe.
+
+Il **cron non consuma questa quota** (`conta_quota=False`): ha già il proprio
+budget dal tetto ai creator attivi. Due budget indipendenti.
+
+Nessun privilegio ad `anon` e `authenticated`, RLS attivo senza policy — come
+`analysis_locks`, `job_locks` e `subscriptions`. La tabella cresce senza limite e
+andrà potata da un job periodico, per il quale `job_locks` è già generica sul
+nome del job.
+
 #### `creators`
 
 Account monitorati da un utente; sorgente dello scraping periodico.

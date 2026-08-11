@@ -231,6 +231,26 @@ async def _assicura_attribuzione(
     return InsightResponse.model_validate(result.data[0])
 
 
+async def _consuma_quota(user_id: str, video_url: str, mode: AnalysisMode) -> None:
+    """Registra l'analisi che sta per partire, o la rifiuta se la quota e' finita.
+
+    Va chiamata **dopo** i controlli di cache e **dentro** il lock, perche' e'
+    li' che la spesa e' decisa. Le conseguenze di sbagliare il punto sono
+    entrambe reali: piu' in alto si conterebbero i cache hit, che non costano
+    nulla; piu' in basso non si conterebbero le analisi che pagano Apify e poi
+    falliscono su Gemini — le stesse che non lasciano alcuna riga in `insights`,
+    ed e' il motivo per cui contare gli insight avrebbe sottostimato l'abuso.
+
+    Non decide nulla da se': l'arbitro e' il trigger `enforce_analysis_quota`
+    (migration 0008), che solleva `PX002` tradotto qui in `AnalysisQuotaError`.
+    Cosi' due richieste concorrenti al tetto non possono superarlo entrambe,
+    cosa che un controllo applicativo leggi-poi-scrivi non garantirebbe.
+    """
+    eventi = await service_table("analysis_events", user_id)
+    async with db_errors("quota giornaliera di analisi"):
+        await eventi.insert({"video_url": video_url, "analysis_mode": mode}).execute()
+
+
 async def perform_analysis(
     *,
     user_id: str,
@@ -242,12 +262,21 @@ async def perform_analysis(
     access_token: str | None = None,
     creator_id: UUID | str | None = None,
     scraped: ScrapedVideo | None = None,
+    conta_quota: bool = True,
 ) -> tuple[InsightResponse, bool]:
     """Analizza un video e ne persiste il risultato.
 
     Restituisce `(record, from_cache)`. `scraped` permette al job cron di
     riutilizzare i metadati già ottenuti dallo scraping, evitando una seconda
     chiamata ad Apify per lo stesso video.
+
+    `conta_quota` distingue i due chiamanti: il percorso manuale consuma la
+    quota giornaliera dell'utente, il cron no. Il cron ha già il proprio budget
+    — creator attivi per `apify_results_per_creator` — e farglielo consumare
+    renderebbe il limite inspiegabile all'utente («perché non posso analizzare?
+    perché stanotte è girato il cron»). È un parametro esplicito e non una
+    deduzione da `creator_id` o `scraped`, che oggi separano i due chiamanti
+    solo per convenzione.
 
     Il lavoro vero è protetto da un lock su `(user_id, video_url, mode)`: senza,
     N richieste concorrenti sullo stesso video producono N inferenze Gemini e N
@@ -294,6 +323,9 @@ async def perform_analysis(
                 user_id,
             )
             return await _assicura_attribuzione(cached, user_id, creator_id), True
+
+        if conta_quota:
+            await _consuma_quota(user_id, video_url, mode)
 
         return await _esegui_analisi(
             user_id=user_id,

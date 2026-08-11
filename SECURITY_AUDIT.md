@@ -29,7 +29,7 @@ documento copre tutte e sette le sezioni.
 | Sezione | Oggetto | Esito |
 |---|---|---|
 | 1 | Superficie di auth/autorizzazione, RLS riletto sullo schema reale | Chiusa — 2 difetti trovati e corretti (`profiles` scrivibile, `TRUNCATE` esente da RLS) |
-| 2 | Abuso e rate limiting, con cifra in dollari | **Parziale** — vettore B chiuso, **vettore A aperto** |
+| 2 | Abuso e rate limiting, con cifra in dollari | Chiusa — vettore B (`0004`) e vettore A (`0008`) entrambi chiusi |
 | 3 | Audit delle dipendenze | Chiusa — 0 vulnerabilità in produzione, 1 solo dev |
 | 4 | Segreti sulla cronologia git completa | Chiusa — pulita, nessun segreto mai committato |
 | 5 | Leak di informazioni negli errori | Chiusa — zero leak su 28 scenari; 1 finding minore |
@@ -118,9 +118,10 @@ legittimo di essere scrivibile da un client, quindi la domanda non si pone — e
 non si porrà nemmeno per `status`, `current_period_end` e l'id cliente Stripe
 della Categoria B.
 
-**Dipendenza risolta**: A2 è stata scritta sopra questo schema, nello stesso
-branch, e `enforce_creator_limit` legge ora da `subscriptions`. **A3** resta
-toccata: se la quota di periodo verrà parametrata sul piano, leggerà da qui.
+**Dipendenze risolte**: A2 è stata scritta sopra questo schema, nello stesso
+branch, e `enforce_creator_limit` legge ora da `subscriptions`. Anche **A3** ne
+dipendeva ed è stata costruita sopra: `analysis_limit_for_tier` legge il piano
+dalla stessa tabella.
 
 ---
 
@@ -194,9 +195,78 @@ Verificato in esercizio: `free → 30`, `pro → 200`, `null → 30`.
 
 ---
 
-## A3 🔴 Vettore A — nessun rate limit su `analyze-video`
+## A3 🟢 Vettore A — **CHIUSA** (migration `0008`, 11 agosto 2026)
 
-**Origine**: sezione 2 · **Stato**: aperto, mai affrontato
+**Origine**: sezione 2 · **Stato**: **fatto**
+
+### La correzione
+
+Tabella append-only `analysis_events` — una riga per analisi **avviata** — più il
+trigger `enforce_analysis_quota` che rifiuta l'inserimento oltre il tetto del
+giorno, con SQLSTATE `PX002` tradotto in `AnalysisQuotaError` (409
+`analysis_quota_reached`), distinto da `plan_limit_reached` del tetto creator.
+
+**Il punto in cui si consuma** è dentro il lock, dopo entrambi i controlli di
+cache e subito prima di `_esegui_analisi`. Le due alternative sbagliano in
+direzioni opposte: più in alto si conterebbero i cache hit, che non costano
+nulla; più in basso non si conterebbero le analisi che pagano Apify e poi
+falliscono su Gemini — **le stesse che non lasciano riga in `insights`**, ed è il
+motivo per cui contare gli insight avrebbe sottostimato proprio l'abuso.
+
+**Append-only e non un contatore aggregato**: l'incremento richiederebbe una RPC,
+perché un upsert PostgREST non può esprimere `conteggio = conteggio + 1`, e
+aprirebbe una terza via d'accesso al database accanto alle due dichiarate in
+`supabase_service`. In più le righe grezze sono **il dato che serve a B4**.
+
+**Quota solo sul percorso manuale**: il cron passa `conta_quota=False`, perché ha
+già il proprio budget dal tetto ai creator attivi. Due budget indipendenti —
+altrimenti un giro notturno azzererebbe le analisi possibili di giorno.
+
+`analysis_limit_for_tier(text)` affianca `creator_limit_for_tier`: `free` 30 al
+giorno (~$1,05), `pro` 300 (~$10,50), su una base di ~$0,035 per analisi. Sono
+**segnaposto dichiarati**, derivati e non misurati — ed è `analysis_events` a
+rendere possibile misurarli.
+
+### Verifica: 18 prove, backend reale contro database reale
+
+Gemini e Apify sostituiti da doppi, quindi il trigger è vero e la spesa no.
+
+| Prova | Esito |
+|---|---|
+| 30ª analisi (ultima ammessa) | `201` |
+| 31ª analisi | **`409 analysis_quota_reached`** |
+| Dettagli interni nel corpo | **nessuno** (né `PX002`, né nomi di tabella o funzione) |
+| Il rifiuto consuma quota? | **no** — resta a 30 |
+| Cache hit a quota esaurita | **`200`**, contatore invariato |
+| Analisi con Gemini KO | `503`, **nessun insight**, **ma quota consumata** |
+| Cron a quota esaurita | procede, e **non** consuma la quota manuale |
+| **5 richieste concorrenti, 1 solo posto** | **1×`201`, 4×`409`** |
+| Piano `pro` oltre 30 | `201` |
+
+La riga sulla concorrenza è quella che conta: l'arbitro è il trigger, non il
+processo, quindi un controllo applicativo leggi-poi-scrivi non sarebbe bastato.
+
+> **Un errore commesso durante la verifica, e la regola che ne è uscita.** Lo
+> scenario sul cron è stato eseguito invocando il cron **vero** contro il
+> database reale. Il cron enumera i creator attivi di *tutti* gli utenti — è il
+> suo scopo — quindi ha scritto due insight fasulli nel feed di un utente reale.
+> Rimossi per id espliciti e verificato che restasse solo la riga legittima;
+> nessun costo, nessuna perdita di dati, nessuna quota consumata all'utente.
+> La regola: **contro il database reale non si invoca mai il cron**, perché è
+> l'unico endpoint il cui perimetro non è l'utente della richiesta. La proprietà
+> che si voleva provare era peraltro già coperta da un test sul doppio.
+
+### Cosa resta annotato
+
+`analysis_events` cresce senza limite e va potata oltre una finestra di
+ritenzione. Non è stato scritto un job: sarebbe il secondo pianificato, e oggi
+non c'è nemmeno il primo (`CRON_ENABLED` è `false`). Il meccanismo però esiste
+già — la `0005` ha reso `job_locks` generica **sul nome del job** esattamente per
+questo caso.
+
+### Da dove veniva
+
+**Stato originale**: aperto, mai affrontato
 
 Misurato: **64 richieste/minuto accettate in sequenza, zero risposte 429, 10
 richieste concorrenti su 10 accettate**. Ogni richiesta accettata è un'inferenza
@@ -209,21 +279,14 @@ Il tetto ai creator della `0004` **non lo chiude**: quello limita il cron, quest
 peggiora in due modi opposti — un `free` con carta rubata, e un `pro` in perfetta
 buona fede che consuma ordini di grandezza più di quanto versa.
 
-**Pronta per un prompt diretto: NO.**
+Delle tre strade valutate — limiter in-process, quota di periodo su Postgres,
+entrambi — è stata scelta la **quota su Postgres**: un limiter in memoria vale
+per istanza, si azzera a ogni deploy e non può esprimere un tetto legato al
+piano. La variante che contava le righe di `insights` è stata scartata perché
+**sottostima**: un'analisi che paga Apify e poi fallisce non lascia riga.
 
-- **Opzione 1** — rate limiter in-process per utente: semplice, ma vale per
-  istanza e si azzera a ogni deploy.
-- **Opzione 2** — quota per periodo su Postgres, contando `insights` per
-  `user_id` e `created_at` (le colonne esistono già): funziona fra istanze e
-  sopravvive ai riavvii, stesso principio di `analysis_locks` e `job_locks`.
-- **Opzione 3** — entrambi: finestra breve in-process contro i burst, quota di
-  periodo nel database contro l'abuso sostenuto.
-
-**Dipendenze**: **A1 è chiusa**, quindi il blocco è rimosso — se la quota verrà
-parametrata sul piano, lo leggerà da `public.subscriptions` tramite
-`creator_limit_for_tier`, o da una funzione sorella costruita allo stesso modo.
-Il conteggio per periodo resta il presupposto di **B4** (misurare i costi reali
-prima di fissare i prezzi): conviene che la stessa struttura serva a entrambi.
+**Dipendenza risolta**: il tetto è parametrato sul piano e lo legge da
+`public.subscriptions`, la tabella introdotta da A1.
 
 ---
 
@@ -599,7 +662,11 @@ Il `pro = 200` di `enforce_creator_limit` è dichiarato segnaposto nella migrati
 stessa: a ~$840/mese di costo per utente va deciso **contro il prezzo del piano**,
 non ereditato.
 
-Non serve infrastruttura nuova: `insights` ha `user_id` e `created_at`.
+**I dati ora esistono**: `analysis_events` (migration `0008`) registra una riga
+per analisi avviata, con `user_id`, `video_url`, `analysis_mode` e `created_at`.
+È nata per imporre la quota di A3, ma è anche esattamente la base di misura che
+qui mancava — comprese le analisi fallite dopo aver speso, che `insights` non
+vedrebbe.
 
 ### Cosa **non** serve
 
@@ -615,7 +682,7 @@ gestione abbonamento: Stripe fa tutte e tre. Il lavoro vero è in **A1**, **A3**
 |---|---|---|---|---|---|---|
 | A1 | Auto-promozione `subscription_tier` via futuro GRANT | 7 (radice 1) | A | **fatto** (`0006`) | n/d | — |
 | A2 | Downgrade non retroattivo sui creator attivi | 7 (da 0004) | A | **fatto** (`0007`) | n/d | — |
-| A3 | Vettore A — nessun rate limit su `analyze-video` | 2 | A | aperto | **no** — 3 opzioni | medio |
+| A3 | Vettore A — nessun rate limit su `analyze-video` | 2 | A | **fatto** (`0008`) | n/d | — |
 | A4 | Rischio Sybil con più account | 2 | A | aperto | **no** — 4 opzioni | da stimare |
 | A5 | Audit delle dipendenze | 3 | A | **fatto** — 0 in produzione, 1 solo dev fuori perimetro | n/d | — |
 | A6 | 500 fuori da `SafeRoute` senza header CORS | 5 | A | aperto | sì | basso |
@@ -648,12 +715,15 @@ gestione abbonamento: Stripe fa tutte e tre. Il lavoro vero è in **A1**, **A3**
 
 1. ~~**A5**~~ — **fatto** il 10 agosto 2026: nessuna azione ne è derivata.
 2. ~~**A1**~~ e ~~**A2**~~ — **fatte** l'11 agosto 2026, migration `0006` e `0007`.
-3. **A3** — il tetto di consumo sul percorso manuale. È ora il buco più grosso
-   rimasto, e la struttura che serve è la stessa di **B4**.
+3. ~~**A3**~~ — **fatta** l'11 agosto 2026, migration `0008`.
 4. **A8 + A10 (parte SSRF) + A11** — correzioni brevi e indipendenti, buone da
-   raggruppare in un solo giro.
+   raggruppare in un solo giro. Sono le prime voci rimaste, e **nessuna richiede
+   una decisione**: si possono affrontare in un unico prompt.
 5. **A9 + A10 (parte cache)** — dopo aver deciso quanto normalizzare.
 6. **A4** — la risposta al Sybil, che conviene decidere insieme al pricing.
 7. Solo allora la **Categoria B**, quando Stripe entrerà davvero.
 
-Chiuse A1, A2 e A5, la prima voce che richiede una tua decisione è ora **A3**.
+Chiuse A1, A2, A3 e A5, **non resta alcuna voce rossa**. Le prime rimaste sono
+tutte pronte per un prompt diretto; le uniche che richiedono una tua decisione
+sono **A4** (Sybil) e **A9** (canonicalizzazione URL), entrambe legate a scelte
+di prodotto.

@@ -760,6 +760,73 @@ volte — la divergenza segnalata come B3 nell'audit. Verificato in esercizio:
 > `authenticated` senza alcun privilegio su `subscriptions`, RLS attivo con zero
 > policy. Utente di prova eliminato con verifica indipendente: **0 residui**.
 
+### ✅ RISOLTO — il vettore A: nessun tetto sulle analisi manuali
+
+Chiuso l'**11 agosto 2026**, migration `0008`. È la voce **A3** di
+`SECURITY_AUDIT.md`, l'ultima rossa rimasta.
+
+`POST /api/v1/analyze-video` non aveva né rate limiter né quota: misurate **64
+richieste/minuto accettate in sequenza, zero 429, 10 richieste concorrenti su 10
+accettate** — cioè **$37–$175 all'ora per singolo account**. Il tetto ai creator
+della `0004` non lo copriva: quello limita il cron, questo è il percorso manuale.
+
+**Il meccanismo.** Tabella append-only `analysis_events`, una riga per analisi
+avviata, più il trigger `enforce_analysis_quota` che rifiuta oltre il tetto del
+giorno con SQLSTATE `PX002` → `AnalysisQuotaError` (409
+`analysis_quota_reached`), distinto da `plan_limit_reached`.
+
+**Il punto in cui si consuma** è dentro il lock, dopo entrambi i controlli di
+cache e prima di `_esegui_analisi`. Le alternative sbagliano in direzioni
+opposte: più in alto si conterebbero i cache hit, che non costano nulla; più in
+basso non si conterebbero le analisi che pagano Apify e poi falliscono su Gemini
+— **le stesse che non lasciano riga in `insights`**, ed è il motivo per cui
+contare gli insight avrebbe sottostimato proprio l'abuso.
+
+Append-only e non un contatore aggregato: l'incremento richiederebbe una RPC — un
+upsert PostgREST non può esprimere `conteggio = conteggio + 1` — e le righe
+grezze sono anche il dato che serve a misurare i costi reali (voce B4), che prima
+non esisteva da nessuna parte.
+
+**Quota solo sul percorso manuale**: il cron passa `conta_quota=False`, perché ha
+già il proprio budget dal tetto ai creator. Due budget indipendenti, altrimenti
+un giro notturno azzererebbe le analisi possibili di giorno.
+
+`analysis_limit_for_tier` affianca `creator_limit_for_tier`: `free` 30/giorno
+(~$1,05), `pro` 300/giorno (~$10,50), su ~$0,035 per analisi. **Segnaposto
+dichiarati**, derivati e non misurati.
+
+**Prova: 18 controlli, backend reale contro database reale**, con Gemini e Apify
+sostituiti da doppi (trigger vero, spesa zero):
+
+| Prova | Esito |
+|---|---|
+| 30ª analisi / 31ª | `201` / **`409 analysis_quota_reached`** |
+| Dettagli interni nel corpo del 409 | **nessuno** |
+| Il rifiuto consuma quota? | **no** |
+| Cache hit a quota esaurita | `200`, contatore invariato |
+| Gemini KO | `503`, nessun insight, **ma quota consumata** |
+| Cron a quota esaurita | procede, e non consuma la quota manuale |
+| **5 richieste concorrenti, 1 posto** | **1×`201`, 4×`409`** |
+| Piano `pro` oltre 30 | `201` |
+
+Più 11 test nella suite (`tests/test_quota_analisi.py`), che coprono ciò che il
+doppio in memoria può riprodurre: chi consuma e chi no, e la traduzione
+dell'errore.
+
+> ⚠️ **Un errore commesso durante la verifica.** Lo scenario sul cron è stato
+> eseguito invocando il cron **vero** contro il database reale. Il cron enumera i
+> creator attivi di *tutti* gli utenti — è il suo scopo — quindi ha scritto due
+> insight fasulli nel feed di un utente reale. Rimossi per id espliciti, con
+> verifica che restasse solo la riga legittima; nessun costo, nessuna perdita di
+> dati, nessuna quota consumata all'utente. **La regola che ne esce: contro il
+> database reale non si invoca mai il cron**, perché è l'unico endpoint il cui
+> perimetro non è l'utente della richiesta.
+
+> `analysis_events` cresce senza limite e va potata oltre una finestra di
+> ritenzione. Non è stato scritto un job: sarebbe il secondo pianificato, e oggi
+> non c'è nemmeno il primo. Il meccanismo però esiste già — la `0005` ha reso
+> `job_locks` generica sul nome del job esattamente per questo.
+
 ### ⚠️ RISCHIO RESIDUO — attacco Sybil con più account
 
 Il tetto limita il danno di **un** account, non di molti. Chi registra N

@@ -77,6 +77,27 @@ class PlanLimitError(PicoxError):
     )
 
 
+class AnalysisQuotaError(PicoxError):
+    """L'utente ha esaurito le analisi manuali previste per oggi.
+
+    Distinta da `PlanLimitError` benché entrambe siano 409 e riguardino il
+    piano: il client deve poter dire «hai esaurito le analisi di oggi» e non
+    «hai troppi creator». Un solo codice per due limiti diversi produrrebbe
+    messaggi generici proprio dove servono istruzioni precise.
+
+    409 e non 429: non è una richiesta troppo frequente da rallentare, è una
+    quota esaurita. Un 429 — specie con `Retry-After` — suggerirebbe un
+    ritentativo che fallirebbe identico fino a domani.
+    """
+
+    status_code = 409
+    code = "analysis_quota_reached"
+    default_message = (
+        "Hai raggiunto il numero massimo di analisi giornaliere previste dal tuo "
+        "piano. La quota si azzera domani."
+    )
+
+
 class AnalysisInProgressError(PicoxError):
     """Un'altra richiesta sta già analizzando questo video per questo utente.
 

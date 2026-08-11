@@ -41,6 +41,7 @@ _OWNER_COLUMN: dict[str, str] = {
     "creators": "user_id",
     "insights": "user_id",
     "analysis_locks": "user_id",
+    "analysis_events": "user_id",
 }
 
 # Colonne nullable che il database restituisce comunque, anche quando l'INSERT

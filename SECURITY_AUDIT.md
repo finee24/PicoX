@@ -310,6 +310,37 @@ gratuiti e automatizzabili.
 L'opzione 4 è l'unica che protegge **anche** dagli scenari non previsti, ed è la
 più economica da mettere: non richiede codice.
 
+### Il segnale log-only: **non implementato, e non per pigrizia**
+
+Richiesto l'11 agosto 2026 un log del signup con IP e timestamp, senza alcun
+blocco. Quattro fatti misurati prima di scrivere codice, che portano a saltarlo:
+
+1. **L'IP non è visibile dove sarebbe naturale metterlo.** Un trigger su
+   `auth.users` vede `inet_client_addr()` = l'indirizzo di **GoTrue**, non
+   dell'utente (misurato: un IPv6 AWS), e `request.headers` / `request.jwt.claims`
+   sono `null` — li imposta PostgREST, non GoTrue. Registrare quel valore
+   produrrebbe una costante che *sembra* un IP: peggio di non averlo.
+2. **Il backend non vede mai il signup.** `auth-form.tsx:76` chiama
+   `supabase.auth.signUp` direttamente. Non esiste un punto nel nostro codice in
+   cui quella richiesta passi.
+3. **Il dato esiste già, nativamente.** `auth.audit_log_entries` ha una colonna
+   `ip_address` dedicata, popolata da GoTrue. Zero codice da scrivere. Oggi la
+   tabella è vuota su questo progetto — da verificare se sia una questione di
+   retention prima di contarci per un'analisi storica.
+4. **Il signup è già limitato, ma non da un controllo di sicurezza.** Misurato:
+   `HTTP 429 over_email_send_rate_limit`. È la quota di invio dell'**SMTP
+   predefinito** di Supabase, non un rate limit sul signup — e **sparisce il
+   giorno in cui si configura un SMTP proprio**, cioè esattamente al lancio.
+
+Il punto 4 corregge questa stessa voce: la barriera di oggi non è solo la verifica
+email, è il fatto che quelle email le manda un SMTP condiviso con quota bassa.
+Chi pianificherà il lancio deve sapere che **configurare l'SMTP rimuove una
+protezione senza che nulla lo segnali**.
+
+Catturare l'IP nei *nostri* log richiederebbe di far passare il signup dal
+backend con un endpoint proxy: più lavoro, e un punto di fallimento in più su una
+registrazione. **Non vale ora**, e il punto 3 lo rende superfluo.
+
 **Dipendenze**: **A3** la mitiga parzialmente (un tetto di consumo per account
 riduce la resa di ogni account falso) ma non la chiude.
 
@@ -479,30 +510,91 @@ Gruppo di controllo: col vecchio codice `netloc` dava `tiktok.com:443` contro
 
 ---
 
-## A9 🟠 Canonicalizzazione degli URL per piattaforma, incompleta
+## A9 🟢 Canonicalizzazione degli URL — **CHIUSA** (11 agosto 2026)
 
-**Origine**: sezione 1 / review avversariale · **Stato**: aperto
+**Origine**: sezione 1 / review avversariale · **Stato**: **fatto**, con un trade-off documentato e non deciso
 
 Misurato: **9 URL dello stesso video → 9 righe → 9 inferenze**. Oltre alla porta
 (A8) restano fuori `youtu.be/<id>` vs `/shorts/<id>`,
 `instagram.com/{p,reel,reels}/<id>`, il punto finale dell'FQDN, il
 percent-encoding e i redirect brevi (`vm.tiktok.com`, `/t/`).
 
-**Pronta per un prompt diretto: NO.** Quanto normalizzare è una scelta con un
-rischio speculare: canonicalizzare troppo può **fondere video distinti** e
-restituire a un utente l'analisi di un altro video.
+### Il vincolo che decide tutto, trovato verificando prima di progettare
 
-- **Opzione 1** — solo le equivalenze certe e verificabili offline (forme di path
-  della stessa piattaforma, FQDN, percent-encoding): nessuna rete, nessun rischio
-  di collisione.
-- **Opzione 2** — anche i redirect brevi, risolvendoli con una richiesta HEAD:
-  copre più casi ma introduce una chiamata di rete nel percorso di cache, con i
-  suoi timeout e i suoi fallimenti.
-- **Opzione 3** — canonicalizzare sull'ID del video estratto per piattaforma
-  invece che sull'URL: la forma più robusta, e la più invasiva da scrivere.
+`insights.video_url` — cioè **la chiave normalizzata** — finisce in un `href`
+cliccabile: `insight-card.tsx:68` la passa a `httpUrlOrNull` e la rende come link.
 
-**Dipendenze**: **A10** — i test su `normalize_video_url` vanno scritti **dopo**
-questa decisione, altrimenti fissano il comportamento che si vuole cambiare.
+**La forma canonica non è solo una chiave: è l'URL che l'utente apre.** Questo
+esclude le canonicalizzazioni più robuste ma non navigabili, ed è il motivo per
+cui l'opzione 3 non è stata applicata (vedi il trade-off in fondo).
+
+### Un bug attivo, corretto
+
+`_HOST_ALIASES` riscriveva `vm.tiktok.com` → `tiktok.com` **lasciando il path del
+link breve**: `vm.tiktok.com/ZMabc` diventava `https://tiktok.com/ZMabc`, un
+indirizzo che **non esiste** — e veniva mostrato all'utente come link. Stessa
+forma per `youtu.be` → `youtube.com`.
+
+Riscrivere l'host senza il path vale solo per host che condividono lo **stesso
+spazio di path** (`www.`, `m.`). Ora la struttura lo impone: gli alias vivono
+dentro `_Piattaforma`, con il commento che spiega perché i domini di link brevi
+non possono starci.
+
+### La struttura, progettata per l'aggiunta
+
+`_Piattaforma(host, alias, percorsi, canonico)` e la tupla `_PIATTAFORME`:
+aggiungere una piattaforma è **una entry**, non una modifica a
+`normalize_video_url`, che infatti non nomina più alcuna piattaforma. Implementate
+**solo Instagram e TikTok**: la entry YouTube non è anticipata.
+
+| | Prima | Dopo |
+|---|---|---|
+| Instagram `/p/`, `/reel/`, `/reels/`, `/tv/` | 4 chiavi | **1** — `instagram.com/reel/<id>` |
+| TikTok con/senza `www.`, `m.`, slash, tracking | più chiavi | **1** |
+| Punto finale dell'FQDN | 2 chiavi | **1** |
+| Percent-encoding (`%41` vs `A`) | 2 chiavi | **1** |
+| `vm.tiktok.com/ZMabc` | URL rotto | resta sé stesso |
+
+**51 test**, con **gruppo di controllo per ogni equivalenza nuova**:
+`_vecchia_normalize` riproduce la logica precedente riga per riga, e ogni caso
+asserisce prima che la vecchia funzione desse due chiavi diverse. Coperti anche i
+casi che **non** devono collassare — il rischio speculare è fondere video
+distinti — l'idempotenza, e la garanzia che la chiave resti un URL navigabile.
+
+### Punto 2 — i link brevi: non risolti, e perché
+
+**Raccomandazione: restare offline.** Risolverli con una `HEAD` metterebbe una
+chiamata di rete nel percorso della **chiave di cache**, quindi su *ogni*
+richiesta — compresi i cache hit, che oggi non costano nulla — con i suoi
+timeout e i suoi fallimenti. E `normalize_video_url` è oggi una funzione pura
+chiamata in cima a `perform_analysis`: renderla `async` e fallibile cambia il suo
+contratto ovunque.
+
+C'è anche una via migliore già disponibile: Apify **risolve già** il link breve
+e restituisce l'URL canonico in `ScrapedVideo.video_url`. Ri-chiavare
+sull'URL risolto **dopo** lo scraping otterrebbe lo stesso risultato senza alcuna
+richiesta aggiuntiva — ma tocca `perform_analysis` e il lock, quindi è un
+intervento a sé, non parte di A9.
+
+### Punto 3 — canonicalizzare sull'ID: il trade-off, **da decidere**
+
+È più robusto, e non marginalmente: lo stesso video TikTok è raggiungibile con
+username diversi nel path, quindi due utenti che incollano lo stesso video da
+fonti diverse pagano oggi due analisi. Un ID lo chiuderebbe.
+
+**Ma richiede di separare la chiave dal valore mostrato.** `tiktok.com/video/<id>`
+non è un indirizzo che si apre, e la colonna è renderizzata come link. Servirebbe:
+
+- una colonna nuova (es. `canonical_key`) con lo `UNIQUE` spostato lì,
+- `video_url` che torna a conservare l'URL originale, per il link,
+- una migration con backfill delle righe esistenti.
+
+**Non è una modifica alla normalizzazione: è una modifica di schema.** L'impatto
+pratico oggi è nullo (1 riga in `insights`), il che la rende anche il momento
+meno costoso per farla, se la si vuole.
+
+**Dipendenza risolta**: la copertura di `normalize_video_url` differita con
+**A10** è inclusa in questi 51 test, ora che la funzione è ferma.
 
 ---
 
@@ -606,16 +698,31 @@ Verificato prima di agire che tutte e quattro fossero ancora aperte.
 
 ---
 
-## A13 🟢 `docker compose up` non è mai stato eseguito
+## A13 ⏸️ `docker compose up` — **non verificabile su questa macchina**
 
-**Origine**: sezione 1 (note preesistenti) · **Stato**: aperto — non verificato
+**Origine**: sezione 1 (note preesistenti) · **Stato**: aperto — verifica tentata l'11 agosto 2026, **impossibile da eseguire**
 
 Il file è scritto ma mai provato. Non è un finding di sicurezza: è una
 configurazione dichiarata funzionante senza prova.
 
-**Pronta per un prompt diretto: SÌ** (è una verifica, non un fix).
+**Docker non è installato**, verificato l'11 agosto 2026 su tre vie
+indipendenti: non è nel `PATH` di bash né di PowerShell, il servizio
+`com.docker.service` non esiste, e Docker Desktop non è presente nei percorsi di
+installazione standard. Non è un problema del `docker-compose.yml`: è l'assenza
+dello strumento con cui provarlo.
 
-**Dipendenze**: nessuna.
+**Cosa serve per chiuderla**: installare Docker Desktop e rieseguire la verifica —
+build, presenza e funzionamento di `ffmpeg`/`ffprobe` dentro il container, `/health`
+che risponde, log di avvio senza errori. Sono ~10 minuti una volta che Docker c'è.
+
+**Perché conta più di quanto sembri**: `render.yaml` usa `runtime: docker` con lo
+stesso `Dockerfile`, e la ragione dichiarata è che il runtime Python di Render non
+ha `ffmpeg`, quindi `probe_duration_seconds` tornerebbe sempre `None` e
+`MAX_VIDEO_DURATION_SECONDS` non verrebbe applicata. Quella catena non è mai stata
+provata end-to-end: il `Dockerfile` che installa `ffmpeg` è l'unica cosa che rende
+vero il limite di durata in produzione.
+
+**Dipendenze**: nessuna, oltre alla presenza di Docker.
 
 ---
 
@@ -737,16 +844,16 @@ gestione abbonamento: Stripe fa tutte e tre. Il lavoro vero è in **A1**, **A3**
 | A1 | Auto-promozione `subscription_tier` via futuro GRANT | 7 (radice 1) | A | **fatto** (`0006`) | n/d | — |
 | A2 | Downgrade non retroattivo sui creator attivi | 7 (da 0004) | A | **fatto** (`0007`) | n/d | — |
 | A3 | Vettore A — nessun rate limit su `analyze-video` | 2 | A | **fatto** (`0008`) | n/d | — |
-| A4 | Rischio Sybil con più account | 2 | A | aperto | **no** — 4 opzioni | da stimare |
+| A4 | Rischio Sybil con più account | 2 | A | aperto — il segnale log-only è **superfluo**: il dato esiste già in `auth.audit_log_entries` | **no** — 4 opzioni | da stimare |
 | A5 | Audit delle dipendenze | 3 | A | **fatto** — 0 in produzione, 1 solo dev fuori perimetro | n/d | — |
 | A6 | 500 fuori da `SafeRoute` senza header CORS | 5 | A | **fatto** | n/d | — |
 | A7 | Preflight CORS fuori dall'envelope | 5 | A | **chiusa per scelta**: non si corregge | n/d | — |
 | A8 | `netloc` invece di `hostname` nella chiave di cache | 1 | A | **fatto** | n/d | — |
-| A9 | Canonicalizzazione URL per piattaforma | 1 | A | aperto | **no** — 3 opzioni | medio |
-| A10 | Nessun test su `_assert_public_target` (SSRF) e `normalize_video_url` | 1 | A | **SSRF fatto**; `normalize_video_url` differito con A9 | n/d | — |
+| A9 | Canonicalizzazione URL per piattaforma | 1 | A | **fatto**; resta aperta la scelta sull'ID (schema) | n/d | — |
+| A10 | Nessun test su `_assert_public_target` (SSRF) e `normalize_video_url` | 1 | A | **fatto** — entrambe le parti | n/d | — |
 | A11 | `check_env.py`: non carica `.env`, crasha su cp1252 | 1 | A | **fatto** | n/d | — |
 | A12 | TODO minori frontend + `.env.example` disallineato | 1 | A | **fatto** (3 su 4; il quarto lasciato per scelta) | n/d | — |
-| A13 | `docker compose up` mai eseguito | 1 | A | non verificato | sì | basso |
+| A13 | `docker compose up` mai eseguito | 1 | A | **non verificabile**: Docker non installato sulla macchina | n/d | — |
 | A14 | PR cron da mergiare, `0005` da applicare, `CRON_ENABLED` | 6 | A | parziale | n/d — azione manuale | basso |
 | — | Chiave `service_role` trapelata e ruotata | 1 | — | **fatto** | — | — |
 | — | `profiles` scrivibile da `authenticated` (GRANT) | 1 | — | **fatto** (`0002`) | — | — |
@@ -772,12 +879,19 @@ gestione abbonamento: Stripe fa tutte e tre. Il lavoro vero è in **A1**, **A3**
 3. ~~**A3**~~ — **fatta** l'11 agosto 2026, migration `0008`.
 4. ~~**A6 + A8 + A10 (parte SSRF) + A11 + A12**~~ — **fatte** l'11 agosto 2026 in
    un unico giro, con **A7** chiusa per decisione (non si corregge).
-5. **A9 + A10 (parte cache)** — dopo aver deciso quanto normalizzare. Da
-   affrontare insieme allo scraper.
-6. **A4** — la risposta al Sybil, che conviene decidere insieme al pricing.
-7. **A13** — verificare `docker compose up`, mai eseguito.
-8. Solo allora la **Categoria B**, quando Stripe entrerà davvero.
+5. ~~**A9 + A10 (parte cache)**~~ — **fatte** l'11 agosto 2026.
+6. **A13** — verificare `docker compose up`: **bloccata**, Docker non è
+   installato sulla macchina. È la prima da sbloccare, perché è la catena che
+   rende vero `MAX_VIDEO_DURATION_SECONDS` in produzione.
+7. **A4** — la risposta al Sybil, da decidere insieme al pricing. Attenzione al
+   punto 4 della voce: configurare un SMTP proprio **rimuove** la protezione di
+   fatto che c'è oggi.
+8. **La scelta sull'ID come chiave di cache** (coda di A9): non è una modifica
+   alla normalizzazione ma di schema, e oggi costa quanto non costerà mai più —
+   1 riga in `insights`.
+9. Solo allora la **Categoria B**, quando Stripe entrerà davvero.
 
-Della Categoria A restano aperte **tre voci**: **A4** e **A9**, entrambe in
-attesa di una decisione di prodotto, e **A13**, che è una verifica e non un fix.
-Nessuna è rossa, e nessuna blocca lo sviluppo di feature nuove.
+Della Categoria A restano **due voci** e **due decisioni**. Le voci: **A4**
+(Sybil) e **A13** (verifica bloccata da Docker). Le decisioni: la risposta al
+Sybil, e se separare la chiave di cache dall'URL mostrato. Nessuna è rossa e
+nessuna blocca lo sviluppo di feature nuove.

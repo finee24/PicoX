@@ -9,6 +9,12 @@ uvicorn[standard]>=0.30,<1.0
 # --- Config & validation -----------------------------------------------------
 pydantic>=2.9,<3.0
 pydantic-settings>=2.5,<3.0
+# Arriva comunque come dipendenza di pydantic-settings, ma `scripts/check_env.py`
+# lo importa direttamente per caricare i `.env` come farebbe `Settings`.
+# Dichiararlo rende quell'uso intenzionale invece che fortunato: il giorno in cui
+# pydantic-settings cambiasse il proprio albero, lo script si romperebbe senza
+# che nulla lo avesse annunciato.
+python-dotenv>=1.0,<2.0
 
 # --- Auth --------------------------------------------------------------------
 # Verifica locale del JWT Supabase senza round-trip verso GoTrue.

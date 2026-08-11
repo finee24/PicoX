@@ -33,6 +33,7 @@ from fastapi.routing import APIRoute
 from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.core.config import get_settings
 from app.core.exceptions import AuthError, PicoxError
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,37 @@ def _validation_details(exc: RequestValidationError | ValidationError) -> list[d
             }
         )
     return details
+
+
+def _cors_headers(request: Request) -> dict[str, str] | None:
+    """Header CORS per una risposta generata **fuori** da `CORSMiddleware`.
+
+    Serve al solo `_handle_unexpected`, che vive in `ServerErrorMiddleware` — il
+    livello più esterno dello stack, quindi **sopra** al CORS. Un'eccezione in un
+    endpoint senza `SafeRoute` finisce lì, e la risposta usciva priva di header
+    CORS: sanificata e corretta, ma illeggibile per il browser, che mostrava un
+    errore di rete al posto dell'envelope. Il caso non è teorico — `/health` è
+    registrato direttamente sull'app.
+
+    `ServerErrorMiddleware` non si sposta: è la sua posizione esterna a garantire
+    che nessun endpoint futuro possa scavalcarlo. Sono gli header a scendere qui.
+
+    **L'`Origin` non viene mai rimandato indietro senza verifica.** Il confronto è
+    per uguaglianza esatta contro `settings.cors_origins`, la stessa lista che usa
+    `CORSMiddleware` e non una regola parallela che potrebbe divergere. Riflettere
+    l'origin ricevuto insieme a `Allow-Credentials: true` trasformerebbe la
+    risposta d'errore esattamente nel buco che il CORS ristretto chiude.
+    """
+    origin = request.headers.get("origin")
+    if not origin or origin not in get_settings().cors_origins:
+        return None
+    return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Credentials": "true",
+        # La risposta dipende dall'`Origin`: senza `Vary` una cache condivisa
+        # potrebbe servire a un'origine gli header calcolati per un'altra.
+        "Vary": "Origin",
+    }
 
 
 class SafeRoute(APIRoute):
@@ -171,5 +203,8 @@ def register_exception_handlers(app: FastAPI) -> None:
             "Errore non gestito fuori dal router in %s %s", request.method, request.url.path
         )
         return error_response(
-            500, "internal_error", "Si è verificato un errore imprevisto."
+            500,
+            "internal_error",
+            "Si è verificato un errore imprevisto.",
+            headers=_cors_headers(request),
         )

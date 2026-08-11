@@ -27,6 +27,12 @@ export function SearchBar({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder="Cerca per keyword o contenuto…"
+        // Stesso limite del backend: `list_insights` dichiara
+        // `Query(max_length=200)` e oltre risponde 422. Senza, incollare un
+        // testo lungo mostrava un errore generico invece di fermarsi al limite.
+        // Il backend tronca poi a 100 caratteri per la ricerca vera
+        // (`_SEARCH_MAX_LENGTH`): qui conta la soglia che genera l'errore.
+        maxLength={200}
         className="pr-10 pl-9"
       />
       {value && (

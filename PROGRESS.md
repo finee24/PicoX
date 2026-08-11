@@ -827,6 +827,69 @@ dell'errore.
 > non c'è nemmeno il primo. Il meccanismo però esiste già — la `0005` ha reso
 > `job_locks` generica sul nome del job esattamente per questo.
 
+### ✅ RISOLTO — batch di chiusura delle voci minori (A6, A8, A10-SSRF, A11, A12)
+
+Chiuse l'**11 agosto 2026**. Nessuna richiedeva decisioni, quindi affrontate in
+un giro solo. Lo stato di ciascuna è stato **riverificato sul codice** prima di
+agire, non dato per buono dalle note.
+
+**A6 — il 500 fuori da `SafeRoute` non portava gli header CORS.** Lo stack è
+`ServerErrorMiddleware → RequestContextMiddleware → CORSMiddleware →
+ExceptionMiddleware → router`: un'eccezione in un endpoint senza `SafeRoute`
+arriva al livello più esterno, che sta **fuori** dal CORS. La risposta era
+sanificata ma illeggibile per il browser, che mostrava "errore di rete" invece
+dell'envelope — e `/health` è registrato proprio così.
+
+`ServerErrorMiddleware` **non si è spostato**: è la sua posizione esterna a
+garantire che nessun endpoint futuro lo scavalchi. Sono gli header a scendere lì,
+con `_cors_headers(request)` che confronta l'`Origin` **per uguaglianza esatta**
+contro `settings.cors_origins`. 5 test in `tests/test_cors_errori.py`; quello che
+conta è l'origin ostile — riflettere l'`Origin` con `Allow-Credentials: true`
+avrebbe trasformato la risposta d'errore nel buco che il CORS ristretto chiude.
+
+**A7 — il preflight fuori envelope: deciso di non correggerlo.** Rivalutato
+insieme ad A6 e confermato. Il corpo di una preflight non è mai mostrato né
+all'utente né al JavaScript, quindi il beneficio è zero mentre il costo è una
+sottoclasse di `CORSMiddleware` da rileggere a ogni aggiornamento di Starlette.
+**Chiusa per scelta, non per omissione.**
+
+**A8 — `netloc` invece di `hostname` nella chiave di cache.** `tiktok.com:443`
+produceva una chiave diversa da `tiktok.com`: stesso video, due righe, **due
+inferenze pagate**, e invisibile all'utente. `hostname` normalizza da sé
+minuscole, credenziali e porta. Verificata prima l'assenza di sovrapposizione con
+**A9**: FQDN con punto finale, forme di path per piattaforma, percent-encoding e
+redirect brevi restano fuori. 12 test in `tests/test_normalizzazione_host.py`,
+con gruppo di controllo che riproduce la divergenza del vecchio codice.
+
+**A10 — la difesa SSRF non aveva un solo test.** 23 test in `tests/test_ssrf.py`,
+nessuno dei quali tocca la rete. Coprono loopback, metadata cloud
+`169.254.169.254`, link-local, i tre range privati, CGNAT, multicast e i
+corrispondenti IPv6; il **DNS con più record di cui uno solo interno**; gli schemi
+non-HTTP rifiutati prima di risolvere; il DNS irraggiungibile che dà 503 e non
+422; e soprattutto il **redirect verso la rete interna**, dove si verifica che la
+richiesta all'indirizzo interno **non venga mai emessa**. La parte su
+`normalize_video_url` resta deliberatamente aperta con A9.
+
+**A11 — `check_env.py`.** Ora carica `backend/.env` e poi il `.env` di root con
+`override=False`: **l'ordine conta**, perché con `override=False` vince il primo
+caricato, quindi `backend/.env` va per primo per riprodurre la precedenza di
+`config.py`. `python-dotenv` è stato dichiarato in `requirements.txt` — arrivava
+comunque da pydantic-settings, ma usarlo senza dichiararlo era fortuna, non
+intenzione. Sul crash cp1252 il pattern di `block_frontend_secrets.py`
+riconfigura `stderr`, ma qui il report esce da `print`: serviva **stdout**.
+Provato: col codice vecchio `UnicodeEncodeError`, con quello nuovo exit 0.
+
+**A12 — i TODO minori.** `maxLength={200}` su `search-bar.tsx` (lo stesso limite
+di `Query(max_length=200)`); la mutation di cancellazione in `creators-view.tsx`
+invalida ora anche il prefisso `["insights"]`; `.env.example` allineato a
+`gemini-flash-latest`. Il quarto punto — denormalizzare l'handle del creator in
+`insights` — **non è stato toccato**: non è un difetto ma una conseguenza
+coerente di `ON DELETE SET NULL`, e aggiungere `creator_username` è una scelta di
+prodotto.
+
+**190 test verdi** (150 → 190), ruff, mypy, `tsc --noEmit`, eslint e build del
+frontend tutti puliti, scan segreti pulito.
+
 ### ⚠️ RISCHIO RESIDUO — attacco Sybil con più account
 
 Il tetto limita il danno di **un** account, non di molti. Chi registra N
@@ -977,31 +1040,34 @@ omissione; `profiles` non viene mai scritta dal backend.
 
 Emersi dall'audit dei contratti, **nessuno bloccante**, tutti nel frontend:
 
-1. `frontend/components/search-bar.tsx` — l'input non ha `maxLength`; il backend
-   accetta `search` fino a 200 caratteri e oltre risponde 422. Incollare un testo
-   lungo mostra un errore generico invece di essere troncato lato client.
-2. `frontend/components/creators-view.tsx` — la mutation di cancellazione
-   invalida solo `["creators"]`, non `["insights"]`. Gli insight in cache
-   conservano il vecchio `creator_id` fino al refetch. Effetto visivo nullo (il
-   badge del creator sparisce comunque, perché la lookup fallisce), ma la cache
-   resta incoerente.
+1. ~~`frontend/components/search-bar.tsx` — l'input non ha `maxLength`~~ —
+   **fatto** l'11 agosto 2026: `maxLength={200}`, lo stesso limite dichiarato dal
+   backend con `Query(max_length=200)`.
+2. ~~`frontend/components/creators-view.tsx` — la mutation di cancellazione
+   invalida solo `["creators"]`~~ — **fatto** l'11 agosto 2026: invalida ora
+   anche il prefisso `["insights"]`, che copre tutte le
+   `["insights", { search, mode }]`.
 3. `insights` non denormalizza l'handle del creator: cancellato il creator,
    l'attribuzione storica è persa per sempre. È coerente con `SET NULL`, ma se
    si vuole conservarla serve una colonna `creator_username` popolata alla
-   scrittura.
+   scrittura. **Lasciato aperto per scelta** l'11 agosto: non è un difetto ma una
+   conseguenza coerente di `ON DELETE SET NULL`, e aggiungere la colonna è una
+   decisione di prodotto sulla conservazione dello storico.
 
 Altro:
 4. ~~Aggiungere `*.log` a `.gitignore`~~ — **fatto** l'8 agosto 2026, insieme
    alla cancellazione di `backend/backend.log`.
-5. `backend/.env.example` riporta ancora `GEMINI_MODEL=gemini-2.5-flash`:
-   conviene allinearlo a `gemini-flash-latest`. (Il `.env.example` di radice non
-   contiene affatto quella riga: la nota precedente indicava il file sbagliato.)
+5. ~~`backend/.env.example` riporta ancora `GEMINI_MODEL=gemini-2.5-flash`~~ —
+   **fatto** l'11 agosto 2026: allineato a `gemini-flash-latest`, il valore che
+   `render.yaml` usava già. (Il `.env.example` di radice non contiene affatto
+   quella riga: la nota precedente indicava il file sbagliato.)
 
 8. **Normalizzazione degli URL incompleta** (review avversariale, verificato:
-   9 URL dello stesso video → 9 righe → 9 inferenze). Il caso peggiore è la
-   porta: `media_service.py:114` usa `parts.netloc` invece di `parts.hostname`,
-   quindi `tiktok.com:443` diventa una chiave diversa da `tiktok.com` — ed è
-   invisibile all'utente. Restano fuori anche `youtu.be/<id>` vs
+   9 URL dello stesso video → 9 righe → 9 inferenze). ~~Il caso peggiore è la
+   porta: `media_service.py:114` usa `parts.netloc` invece di
+   `parts.hostname`~~ — **corretto l'11 agosto 2026** (voce A8), con 12 test in
+   `tests/test_normalizzazione_host.py`. Restano fuori, e sono la voce **A9**
+   ancora aperta perché richiede una decisione, `youtu.be/<id>` vs
    `/shorts/<id>`, `instagram.com/{p,reel,reels}/<id>`, il punto finale
    dell'FQDN, il percent-encoding e i redirect brevi (`vm.tiktok.com`, `/t/`),
    questi ultimi già documentati nel codice.
@@ -1009,18 +1075,23 @@ Altro:
    `conftest.py` è `autouse` e sostituisce `download_to_temp` in tutta la
    suite: nessun test esercitava il modulo vero. L'8 agosto 2026 sono stati
    aggiunti test diretti su `_per_hop_headers`, sul logging del download e su
-   `detect_platform`, ma **restano scoperti** `normalize_video_url` (la chiave
-   di cache) e `_assert_public_target` (la difesa SSRF).
+   `detect_platform`. `_assert_public_target` (la difesa SSRF) è stata coperta
+   l'**11 agosto 2026** con 23 test in `tests/test_ssrf.py`. **Resta scoperta**
+   `normalize_video_url` (la chiave di cache), deliberatamente: fissarne ora il
+   comportamento vincolerebbe la decisione di A9.
    Nota collegata: `test_apify_non_raggiungibile_non_blocca_l_analisi`
    (`test_analyze_flow.py:360`) è verde per costruzione — con il codice reale
    l'URL originale di un Reel è HTML e `_guess_mime_type` solleverebbe 503. La
    proprietà "Apify non è fatale" vale solo per link diretti a `.mp4`.
 
-### `backend/scripts/check_env.py` — due difetti aperti
+### ✅ `backend/scripts/check_env.py` — due difetti, entrambi corretti
 
 Emersi l'8 agosto 2026 usando lo script per validare la configurazione dopo la
-rotazione delle chiavi. Nessuno dei due è bloccante, **entrambi sono fuori dal
-batch di fix pre-commit** per decisione esplicita.
+rotazione delle chiavi, e lasciati fuori dal batch di fix pre-commit per
+decisione esplicita. **Chiusi entrambi l'11 agosto 2026** (voce A11), con le
+correzioni descritte sopra: caricamento dei due `.env` nell'ordine che riproduce
+la precedenza di `config.py`, e riconfigurazione di **stdout** (non stderr, che
+è il flusso usato dal pattern gemello in `block_frontend_secrets.py`).
 
 6. **Non carica mai `.env`.** Lo script legge solo `os.environ` (riga 83 e
    seguenti). Dentro Docker funziona, perché `env_file` popola l'ambiente prima

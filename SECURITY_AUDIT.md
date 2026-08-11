@@ -393,9 +393,9 @@ descritto, non su un numero.
 
 ---
 
-## A6 🟡 Un 500 fuori da `SafeRoute` non porta gli header CORS
+## A6 🟢 Un 500 fuori da `SafeRoute` senza header CORS — **CHIUSA** (11 agosto 2026)
 
-**Origine**: sezione 5 · **Stato**: aperto (minore, nessun leak)
+**Origine**: sezione 5 · **Stato**: **fatto**
 
 Lo stack è `ServerErrorMiddleware → RequestContextMiddleware → CORSMiddleware →
 ExceptionMiddleware → router`. Un'eccezione dentro un router con
@@ -408,15 +408,27 @@ Non è un leak: la risposta è sanificata in entrambi i casi. È che il browser 
 riesce a leggerla e il frontend mostra "errore di rete" invece dell'envelope. Il
 caso non è teorico: `/health` in `main.py` è già registrato così.
 
-**Pronta per un prompt diretto: SÌ.** Strada già individuata e senza alternative
-sensate: far generare gli header a `_handle_unexpected`, che riceve già la
-`Request` — match **esatto** dell'`Origin` contro `settings.cors_origins` (la
-stessa lista di `CORSMiddleware`, non una regola parallela), più
-`Allow-Credentials` e `Vary: Origin`. Il punto delicato, da non sbagliare: **mai
-riflettere l'`Origin` ricevuto senza verificarlo**, o la risposta d'errore
-diventa il buco che il CORS ristretto chiudeva.
+**La correzione.** `_cors_headers(request)` in `error_handler.py`, usata da
+`_handle_unexpected`: legge `Origin`, lo confronta **per uguaglianza esatta**
+contro `settings.cors_origins` — la stessa lista di `CORSMiddleware`, non una
+regola parallela che potrebbe divergere — e solo se combacia lo rimanda con
+`Allow-Credentials` e `Vary: Origin`. `ServerErrorMiddleware` **non si è
+spostato**: è la sua posizione esterna a garantire che nessun endpoint futuro
+possa scavalcarlo. Sono gli header a scendere lì.
 
-**Dipendenze**: nessuna.
+**Prove** (`tests/test_cors_errori.py`, 5 test):
+
+| Prova | Esito |
+|---|---|
+| 500 senza `SafeRoute`, origin ammesso | header CORS presenti |
+| 500 senza `SafeRoute`, **origin ostile** | **nessun header**, l'origin non compare da nessuna parte |
+| Nessun header `Origin` (curl, scheduler) | nessun header inventato |
+| 500 **con** `SafeRoute` (gruppo di controllo) | invariato, header da `CORSMiddleware` |
+| Corpo in entrambi i percorsi | sanificato — regressione della sezione 5 |
+
+Il secondo è quello che rende il fix sicuro invece che comodo: riflettere
+l'`Origin` insieme a `Allow-Credentials: true` avrebbe trasformato la risposta
+d'errore nel buco che il CORS ristretto chiude.
 
 ---
 
@@ -433,26 +445,37 @@ il browser fallisce la preflight e basta. Il beneficio di uniformarlo è **zero*
 il costo è una sottoclasse di un middleware di sicurezza da rileggere a ogni
 aggiornamento di Starlette.
 
-**Pronta per un prompt diretto: SÌ** (tecnicamente banale) — ma la
-raccomandazione è di lasciarlo com'è e considerare la voce chiusa per decisione.
-
-**Dipendenze**: nessuna.
+**Decisione dell'11 agosto 2026: non si corregge.** Rivalutata insieme ad A6 e
+confermata. Il corpo di una preflight non viene mai mostrato né all'utente né al
+JavaScript — il browser fallisce la preflight e basta — quindi il beneficio è
+esattamente zero, mentre il costo è una sottoclasse di `CORSMiddleware` da
+rileggere a ogni aggiornamento di Starlette. **Voce chiusa per scelta, non per
+omissione.**
 
 ---
 
-## A8 🟠 Normalizzazione URL: la porta rompe la chiave di cache
+## A8 🟢 La porta rompeva la chiave di cache — **CHIUSA** (11 agosto 2026)
 
-**Origine**: sezione 1 / review avversariale · **Stato**: aperto
+**Origine**: sezione 1 / review avversariale · **Stato**: **fatto**
 
 `media_service.py:114` usa `parts.netloc` invece di `parts.hostname`, quindi
 `tiktok.com:443` produce una chiave di cache diversa da `tiktok.com` — stesso
 video, due righe, **due inferenze pagate**. È invisibile all'utente.
 
-**Pronta per un prompt diretto: SÌ.** `netloc` → `hostname` non ha alternative
-plausibili.
+**La correzione.** `parts.hostname`, che normalizza da sé minuscole, credenziali
+e porta — e sostituisce anche lo `split` su `@` che stava lì prima. Perdere la
+porta non fonde risorse distinte: l'URL canonico forza già lo schema a `https`,
+quindi `http://x:8080` e `https://x` collassavano comunque, e `detect_platform`
+ammette solo gli host delle tre piattaforme supportate.
 
-**Dipendenze**: va scritta insieme ai test di **A10**, o la correzione resta
-senza copertura.
+**Nessuna sovrapposizione con A9**, verificata prima di scrivere: il punto finale
+dell'FQDN, le forme di path per piattaforma, il percent-encoding e i redirect
+brevi restano fuori — `hostname` non li tocca.
+
+**Prove** (`tests/test_normalizzazione_host.py`, 12 test): `:443`, `:80`, `:8443`,
+host maiuscolo, `www.`/`m.` con porta, credenziali nell'URL, e URL senza host.
+Gruppo di controllo: col vecchio codice `netloc` dava `tiktok.com:443` contro
+`tiktok.com`, cioè due chiavi e due inferenze pagate.
 
 ---
 
@@ -483,9 +506,9 @@ questa decisione, altrimenti fissano il comportamento che si vuole cambiare.
 
 ---
 
-## A10 🟠 La difesa SSRF non ha alcun test
+## A10 🟠 Copertura di `media_service` — **parte SSRF CHIUSA** (11 agosto 2026)
 
-**Origine**: sezione 1 · **Stato**: parziale
+**Origine**: sezione 1 · **Stato**: parziale — SSRF fatto, `normalize_video_url` differito con A9
 
 La fixture `downloads` di `conftest.py` è `autouse` e sostituisce
 `download_to_temp` in tutta la suite: per molto tempo nessun test ha esercitato
@@ -503,19 +526,30 @@ l'URL originale di un Reel è HTML e `_guess_mime_type` solleverebbe 503. La
 proprietà che il test dichiara di provare vale solo per link diretti a `.mp4`. Un
 test che non può fallire non è copertura.
 
-**Pronta per un prompt diretto: PARZIALE.**
-`_assert_public_target` **sì, subito** — il comportamento atteso non dipende da
-nessuna decisione aperta, ed è la parte con rilevanza di sicurezza.
-`normalize_video_url` **no**: dipende da A9.
+**Fatto: `tests/test_ssrf.py`, 23 test.** Nessuno tocca la rete —
+`socket.getaddrinfo` è sostituito, i redirect passano da un `httpx.MockTransport`.
 
-**Dipendenze**: la parte su `normalize_video_url` dipende da **A9**; la parte
-SSRF da nulla.
+| Gruppo | Copertura |
+|---|---|
+| Indirizzi rifiutati | loopback, metadata cloud `169.254.169.254`, link-local, `10/8`, `172.16/12`, `192.168/16`, CGNAT, unspecified, multicast, e i corrispondenti IPv6 |
+| Host pubblico | passa — gruppo di controllo, senza il quale i test sopra sarebbero verdi anche con una funzione che rifiuta tutto |
+| **DNS con più record, uno solo interno** | rifiutato: è l'attacco che passerebbe se il controllo guardasse solo il primo indirizzo |
+| Schemi | `file://`, `gopher://`, `ftp://`, `data:` rifiutati **prima** di risolvere |
+| DNS irraggiungibile | `503` e non `422` — un guasto esterno non è un input non valido |
+| **Redirect verso la rete interna** | fermato, e la richiesta all'indirizzo interno **non viene mai emessa** |
+| Catena di redirect infinita | si ferma al tetto |
+| Messaggio d'errore | non riporta né l'IP né l'host: sarebbe un oracolo per mappare la rete |
+
+**Resta aperta** la parte su `normalize_video_url`, deliberatamente: fissare ora
+il comportamento della chiave di cache vincolerebbe la decisione di **A9**, che
+deve poter cambiare quanto si normalizza senza rischiare di fondere video
+distinti.
 
 ---
 
-## A11 🟡 `check_env.py` — due difetti, uno dei quali si manifesta proprio quando serve
+## A11 🟢 `check_env.py` — **CHIUSA** (11 agosto 2026)
 
-**Origine**: sezione 1 (note preesistenti) · **Stato**: aperto
+**Origine**: sezione 1 (note preesistenti) · **Stato**: **fatto**
 
 1. **Non carica mai `.env`**: legge solo `os.environ`. Dentro Docker funziona,
    ma il README lo documenta come passo del setup locale non-Docker, dove riporta
@@ -526,29 +560,49 @@ SSRF da nulla.
    `block_frontend_secrets.py` risolve lo stesso problema con
    `sys.stderr.reconfigure(encoding="utf-8")`.
 
-**Pronta per un prompt diretto: SÌ.** Entrambe le correzioni sono meccaniche.
+**Correzione 1 — il caricamento.** Lo script carica ora `backend/.env` e poi il
+`.env` di root, con `override=False`. **L'ordine non è casuale**: con
+`override=False` vince il primo file caricato, quindi `backend/.env` va per
+primo per riprodurre la precedenza dichiarata in `config.py`, e le variabili
+d'ambiente vere continuano a vincere su entrambi. `python-dotenv` è stato
+**dichiarato in `requirements.txt`**: arrivava comunque come dipendenza di
+pydantic-settings, ma usarlo direttamente senza dichiararlo lo rendeva fortunato
+invece che intenzionale.
 
-**Dipendenze**: nessuna.
+**Correzione 2 — l'encoding.** Il pattern di `block_frontend_secrets.py`
+riconfigura `stderr`; qui il report esce da `print`, quindi il flusso da
+riconfigurare è **stdout** — l'adattamento era necessario. Riconfigurati
+entrambi, con `errors="replace"` come rete finale.
+
+**Prove.** Lo script eseguito dalla cartella `backend/` come documenta il README
+riporta ora la configurazione come valida invece di dichiarare assenti tutte le
+variabili obbligatorie. Con `PYTHONIOENCODING=cp1252`: il codice vecchio solleva
+`UnicodeEncodeError: character maps to <undefined>`, quello nuovo esce `0` con
+stderr vuoto.
 
 ---
 
-## A12 🟢 TODO minori, tutti non bloccanti
+## A12 🟢 TODO minori — **CHIUSI** (11 agosto 2026)
 
-**Origine**: sezione 1 · **Stato**: aperti
+**Origine**: sezione 1 · **Stato**: **fatto** (3 corretti, 1 lasciato per scelta)
 
-- `search-bar.tsx` — l'input non ha `maxLength`; oltre 200 caratteri il backend
-  risponde 422 e l'utente vede un errore generico invece di un troncamento;
-- `creators-view.tsx` — la mutation di cancellazione invalida `["creators"]` ma
-  non `["insights"]`: la cache resta incoerente (effetto visivo nullo);
-- `insights` non denormalizza l'handle del creator: cancellato il creator,
-  l'attribuzione storica è persa. Coerente con `ON DELETE SET NULL`, ma serve una
-  colonna `creator_username` se la si vuole conservare;
-- `backend/.env.example` riporta ancora `GEMINI_MODEL=gemini-2.5-flash`, mentre
-  `render.yaml` usa `gemini-flash-latest`.
+- ✅ `search-bar.tsx` — `maxLength={200}`, lo stesso limite che `list_insights`
+  dichiara con `Query(max_length=200)`. Nota registrata: il backend tronca poi a
+  100 caratteri per la ricerca vera (`_SEARCH_MAX_LENGTH`), quindi fra 100 e 200
+  caratteri l'utente non riceve errori ma cerca solo sui primi 100 — comportamento
+  preesistente, non toccato;
+- ✅ `creators-view.tsx` — la mutation di cancellazione invalida ora anche il
+  prefisso `["insights"]`. È il prefisso e non la chiave completa perché le query
+  reali sono `["insights", { search, mode }]`, e invalidare il prefisso le copre
+  tutte — come già faceva `analyze-input.tsx`;
+- ✅ `backend/.env.example` allineato a `gemini-flash-latest`, il valore che
+  `render.yaml` usava già: erano due default diversi fra sviluppo e produzione;
+- ⏸️ `insights` **non** denormalizza l'handle del creator. Lasciato com'è: non è
+  un difetto ma una conseguenza coerente di `ON DELETE SET NULL`, e aggiungere
+  una colonna `creator_username` è una scelta di prodotto sulla conservazione
+  dello storico, non una correzione.
 
-**Pronta per un prompt diretto: SÌ.**
-
-**Dipendenze**: nessuna.
+Verificato prima di agire che tutte e quattro fossero ancora aperte.
 
 ---
 
@@ -685,13 +739,13 @@ gestione abbonamento: Stripe fa tutte e tre. Il lavoro vero è in **A1**, **A3**
 | A3 | Vettore A — nessun rate limit su `analyze-video` | 2 | A | **fatto** (`0008`) | n/d | — |
 | A4 | Rischio Sybil con più account | 2 | A | aperto | **no** — 4 opzioni | da stimare |
 | A5 | Audit delle dipendenze | 3 | A | **fatto** — 0 in produzione, 1 solo dev fuori perimetro | n/d | — |
-| A6 | 500 fuori da `SafeRoute` senza header CORS | 5 | A | aperto | sì | basso |
-| A7 | Preflight CORS fuori dall'envelope | 5 | A | aperto | sì — *ma si raccomanda di non farlo* | basso |
-| A8 | `netloc` invece di `hostname` nella chiave di cache | 1 | A | aperto | sì | basso |
+| A6 | 500 fuori da `SafeRoute` senza header CORS | 5 | A | **fatto** | n/d | — |
+| A7 | Preflight CORS fuori dall'envelope | 5 | A | **chiusa per scelta**: non si corregge | n/d | — |
+| A8 | `netloc` invece di `hostname` nella chiave di cache | 1 | A | **fatto** | n/d | — |
 | A9 | Canonicalizzazione URL per piattaforma | 1 | A | aperto | **no** — 3 opzioni | medio |
-| A10 | Nessun test su `_assert_public_target` (SSRF) e `normalize_video_url` | 1 | A | parziale | parziale — SSRF sì, resto dopo A9 | basso–medio |
-| A11 | `check_env.py`: non carica `.env`, crasha su cp1252 | 1 | A | aperto | sì | basso |
-| A12 | TODO minori frontend + `.env.example` disallineato | 1 | A | aperti | sì | basso |
+| A10 | Nessun test su `_assert_public_target` (SSRF) e `normalize_video_url` | 1 | A | **SSRF fatto**; `normalize_video_url` differito con A9 | n/d | — |
+| A11 | `check_env.py`: non carica `.env`, crasha su cp1252 | 1 | A | **fatto** | n/d | — |
+| A12 | TODO minori frontend + `.env.example` disallineato | 1 | A | **fatto** (3 su 4; il quarto lasciato per scelta) | n/d | — |
 | A13 | `docker compose up` mai eseguito | 1 | A | non verificato | sì | basso |
 | A14 | PR cron da mergiare, `0005` da applicare, `CRON_ENABLED` | 6 | A | parziale | n/d — azione manuale | basso |
 | — | Chiave `service_role` trapelata e ruotata | 1 | — | **fatto** | — | — |
@@ -716,14 +770,14 @@ gestione abbonamento: Stripe fa tutte e tre. Il lavoro vero è in **A1**, **A3**
 1. ~~**A5**~~ — **fatto** il 10 agosto 2026: nessuna azione ne è derivata.
 2. ~~**A1**~~ e ~~**A2**~~ — **fatte** l'11 agosto 2026, migration `0006` e `0007`.
 3. ~~**A3**~~ — **fatta** l'11 agosto 2026, migration `0008`.
-4. **A8 + A10 (parte SSRF) + A11** — correzioni brevi e indipendenti, buone da
-   raggruppare in un solo giro. Sono le prime voci rimaste, e **nessuna richiede
-   una decisione**: si possono affrontare in un unico prompt.
-5. **A9 + A10 (parte cache)** — dopo aver deciso quanto normalizzare.
+4. ~~**A6 + A8 + A10 (parte SSRF) + A11 + A12**~~ — **fatte** l'11 agosto 2026 in
+   un unico giro, con **A7** chiusa per decisione (non si corregge).
+5. **A9 + A10 (parte cache)** — dopo aver deciso quanto normalizzare. Da
+   affrontare insieme allo scraper.
 6. **A4** — la risposta al Sybil, che conviene decidere insieme al pricing.
-7. Solo allora la **Categoria B**, quando Stripe entrerà davvero.
+7. **A13** — verificare `docker compose up`, mai eseguito.
+8. Solo allora la **Categoria B**, quando Stripe entrerà davvero.
 
-Chiuse A1, A2, A3 e A5, **non resta alcuna voce rossa**. Le prime rimaste sono
-tutte pronte per un prompt diretto; le uniche che richiedono una tua decisione
-sono **A4** (Sybil) e **A9** (canonicalizzazione URL), entrambe legate a scelte
-di prodotto.
+Della Categoria A restano aperte **tre voci**: **A4** e **A9**, entrambe in
+attesa di una decisione di prodotto, e **A13**, che è una verifica e non un fix.
+Nessuna è rossa, e nessuna blocca lo sviluppo di feature nuove.

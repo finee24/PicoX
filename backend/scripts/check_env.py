@@ -23,9 +23,44 @@ Uso:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
+from pathlib import Path
 from urllib.parse import urlsplit
+
+from dotenv import load_dotenv
+
+# Il report usa `✓`, `✗` e `!`. Su una console Windows a cp1252 la `print` di un
+# carattere fuori dalla codepage solleva `UnicodeEncodeError`, e lo script
+# moriva **proprio quando aveva un errore da segnalare** — il caso peggiore per
+# uno strumento diagnostico, perché l'unico output che si vede è un traceback
+# sull'encoding invece della variabile mancante.
+#
+# `block_frontend_secrets.py` risolve lo stesso problema riconfigurando
+# `stderr`; qui il report esce da `print`, quindi il flusso da riconfigurare è
+# **stdout**. Entrambi, per sicurezza. `errors="replace"` è la rete finale: se
+# anche utf-8 non fosse scrivibile, si perde un glifo e non il messaggio.
+for _flusso in (sys.stdout, sys.stderr):
+    with contextlib.suppress(AttributeError, ValueError):
+        _flusso.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+
+# `Settings` legge `("../.env", ".env")` relativi alla CWD, ma questo script
+# guardava solo `os.environ`: eseguito come documenta il README — fuori da
+# Docker, dalla cartella `backend/` — riportava *tutte* le variabili
+# obbligatorie come assenti, pur essendo la configurazione corretta. Dentro
+# Docker funzionava, perché `env_file` popola l'ambiente prima dell'entrypoint,
+# ed è per questo che il difetto era rimasto invisibile.
+#
+# L'ORDINE DI CARICAMENTO NON È CASUALE. `load_dotenv` con `override=False`
+# lascia vincere ciò che è già in `os.environ`: quindi il **primo** file
+# caricato vince sul secondo, e le variabili d'ambiente vere vincono su
+# entrambi. Per riprodurre la precedenza dichiarata in `config.py` — «`backend/.env`
+# ha precedenza sul `.env` di root» — `backend/.env` va caricato per primo.
+_BACKEND = Path(__file__).resolve().parent.parent
+for _env in (_BACKEND / ".env", _BACKEND.parent / ".env"):
+    if _env.is_file():
+        load_dotenv(_env, override=False)
 
 # --- Obbligatorie: senza, il backend non può funzionare ----------------------
 REQUIRED: dict[str, str] = {

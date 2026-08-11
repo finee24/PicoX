@@ -890,6 +890,63 @@ prodotto.
 **190 test verdi** (150 → 190), ruff, mypy, `tsc --noEmit`, eslint e build del
 frontend tutti puliti, scan segreti pulito.
 
+### ✅ RISOLTO — canonicalizzazione degli URL (A9), e la copertura di A10 completata
+
+Chiusa l'**11 agosto 2026**. Ogni chiave diversa per lo stesso video è
+un'analisi pagata due volte: la review avversariale aveva misurato 9 URL dello
+stesso video → 9 righe → 9 inferenze.
+
+**Il vincolo che decide tutto, trovato verificando prima di progettare.**
+`insights.video_url` — cioè la chiave normalizzata — finisce in un `href`
+cliccabile (`insight-card.tsx:68`). **La forma canonica è l'URL che l'utente
+apre**, non solo una chiave. Da qui il limite a quanto si può canonicalizzare.
+
+**Un bug attivo, corretto.** `_HOST_ALIASES` riscriveva `vm.tiktok.com` →
+`tiktok.com` lasciando il path del link breve: `vm.tiktok.com/ZMabc` diventava
+`https://tiktok.com/ZMabc`, **un indirizzo che non esiste**, mostrato all'utente
+come link. Ora gli alias vivono dentro `_Piattaforma`, e il commento spiega
+perché i domini di link brevi non possono starci.
+
+**Struttura estendibile**: `_Piattaforma(host, alias, percorsi, canonico)` e la
+tupla `_PIATTAFORME`. Aggiungere una piattaforma è **una entry**, non una
+modifica a `normalize_video_url`, che infatti non nomina più alcuna piattaforma.
+Implementate **solo Instagram e TikTok**: la entry YouTube non è anticipata.
+
+| | Prima | Dopo |
+|---|---|---|
+| Instagram `/p/`, `/reel/`, `/reels/`, `/tv/` | 4 chiavi | **1** |
+| TikTok con/senza `www.`, `m.`, slash, tracking | più chiavi | **1** |
+| Punto finale dell'FQDN, percent-encoding | 2 chiavi ciascuno | **1** |
+| `vm.tiktok.com/ZMabc` | **URL rotto** | resta sé stesso |
+
+**51 test** con gruppo di controllo per ogni equivalenza: `_vecchia_normalize`
+riproduce la logica precedente, e ogni caso asserisce prima che quella desse due
+chiavi diverse. Coperti anche i casi che **non** devono collassare, l'idempotenza
+e la navigabilità della chiave. Include la copertura di `normalize_video_url`
+differita con **A10**, che risulta ora chiusa in entrambe le parti.
+
+**Due cose non fatte, e perché.** I **link brevi** non si risolvono: una `HEAD`
+metterebbe una chiamata di rete nel percorso della chiave di cache, su ogni
+richiesta compresi i cache hit — e Apify risolve già il link, quindi la via
+migliore è ri-chiavare dopo lo scraping, che però tocca `perform_analysis` e il
+lock. La **chiave sull'ID del video** sarebbe più robusta (lo stesso video TikTok
+è raggiungibile con username diversi) ma richiede di separare la chiave dal
+valore mostrato: colonna nuova, `UNIQUE` spostato, migration con backfill. È una
+modifica di schema, non di normalizzazione — **decisione aperta**, e oggi costa
+quanto non costerà mai più: 1 riga in `insights`.
+
+### ⏸️ A13 — verifica di `docker compose` **non eseguibile**
+
+Tentata l'11 agosto 2026. **Docker non è installato**, verificato su tre vie
+indipendenti: assente dal `PATH` di bash e di PowerShell, servizio
+`com.docker.service` inesistente, Docker Desktop non presente nei percorsi
+standard. Non è un problema del `docker-compose.yml`: manca lo strumento.
+
+Conta più di quanto sembri: `render.yaml` usa `runtime: docker` con lo stesso
+`Dockerfile`, e la ragione dichiarata è che senza `ffmpeg` la durata del video
+non sarebbe verificabile e `MAX_VIDEO_DURATION_SECONDS` non verrebbe applicata.
+Quella catena non è mai stata provata end-to-end.
+
 ### ⚠️ RISCHIO RESIDUO — attacco Sybil con più account
 
 Il tetto limita il danno di **un** account, non di molti. Chi registra N
@@ -899,7 +956,27 @@ L'unica barriera oggi è la **verifica email di Supabase Auth**, che alza il
 costo dell'attacco ma non lo impedisce: gli indirizzi usa e getta sono gratuiti
 e automatizzabili.
 
-Nessuna azione ora — è una decisione di prodotto che va presa insieme al
+**Il segnale log-only richiesto l'11 agosto non è stato implementato**, e non
+per pigrizia. Quattro fatti misurati:
+
+1. un trigger su `auth.users` vede `inet_client_addr()` = l'indirizzo di
+   **GoTrue**, non dell'utente, e `request.headers` è `null` (lo imposta
+   PostgREST, non GoTrue): registrarlo darebbe una costante che *sembra* un IP;
+2. il backend **non vede mai il signup** — `auth-form.tsx:76` chiama
+   `supabase.auth.signUp` direttamente;
+3. il dato **esiste già**: `auth.audit_log_entries.ip_address`, popolata da
+   GoTrue. Zero codice. (Oggi la tabella è vuota: da capire se sia retention
+   prima di contarci per un'analisi storica.)
+4. il signup è già limitato, ma **non da un controllo di sicurezza**: misurato
+   `HTTP 429 over_email_send_rate_limit`, cioè la quota dell'SMTP predefinito di
+   Supabase. **Sparisce configurando un SMTP proprio**, cioè al lancio.
+
+Il punto 4 corregge questa voce: la barriera non è solo la verifica email, è che
+quelle email le manda un SMTP con quota bassa. Chi pianifica il lancio deve
+sapere che **configurare l'SMTP rimuove una protezione senza che nulla lo
+segnali**.
+
+Nessun'altra azione ora — è una decisione di prodotto che va presa insieme al
 billing. Le opzioni sul tavolo: CAPTCHA al signup, limite di registrazioni per
 IP o per dominio email, verifica della carta anche sul piano gratuito, oppure
 un tetto globale di spesa per progetto lato Apify/Gemini come rete di sicurezza

@@ -233,6 +233,15 @@ function CreatorRow({ creator }: { creator: Creator }) {
     mutationFn: () => deleteCreator(creator.id),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: CREATORS_KEY });
+      // Anche gli insight: `insights.creator_id` è `ON DELETE SET NULL`, quindi
+      // la cancellazione di un creator cambia righe che stanno nell'altra
+      // cache. Senza questa riga gli insight già scaricati conservavano il
+      // vecchio `creator_id` fino al refetch — incoerenza invisibile finché
+      // qualcosa non prova a risolvere quell'id.
+      // La chiave è il prefisso `["insights"]`: le query reali sono
+      // `["insights", { search, mode }]`, e invalidare il prefisso le copre
+      // tutte, come già fa `analyze-input.tsx`.
+      void queryClient.invalidateQueries({ queryKey: ["insights"] });
       toast.success("Creator rimosso", {
         description: "Gli insight già generati restano in archivio.",
       });

@@ -263,6 +263,22 @@ Dettagli, e cosa non è esprimibile in `vercel.json`, in
   ai *Redirect URLs*, altrimenti i link di conferma email rimandano a
   `localhost`.
 
+> ⚠️ **Se in questa stessa schermata configurerete un SMTP proprio** (Supabase →
+> Authentication → Emails → SMTP Settings), sappiate che state **rimuovendo una
+> protezione**, e nulla ve lo segnalerà.
+>
+> Oggi il signup di massa è di fatto limitato dalla quota di invio dell'SMTP
+> predefinito di Supabase — misurato: `HTTP 429 over_email_send_rate_limit`. Non
+> è un controllo di sicurezza, è un limite del mittente condiviso, e sparisce con
+> il primo provider proprio. Da quel momento la registrazione di N account
+> automatizzati torna praticabile, e con essa il costo N × il tetto per utente.
+>
+> È la voce **A4** di [`SECURITY_AUDIT.md`](SECURITY_AUDIT.md), dove ci sono le
+> quattro opzioni valutate (CAPTCHA, limite per IP o dominio, carta anche sul
+> piano gratuito, tetto di spesa lato provider). **Nessuna è implementata.**
+> Questa nota è qui, e non solo lì, perché chi configura l'SMTP sta guardando
+> questa pagina — non l'audit.
+
 Gli URL di preview di Vercel hanno un origin diverso per ogni branch e **non**
 sono ammessi dal CORS: è voluto. Per provare un branch contro un backend reale
 conviene un secondo servizio Render di staging con il proprio `FRONTEND_URL`.

@@ -112,12 +112,21 @@ def normalize_video_url(raw_url: str) -> str:
 
     if parts.scheme.lower() not in _ALLOWED_SCHEMES:
         raise PicoxValidationError("Sono ammessi solo URL http o https.")
-    if not parts.netloc:
+    # `hostname` e non `netloc`. Il secondo include la **porta**, quindi
+    # `tiktok.com:443` produceva una chiave di cache diversa da `tiktok.com`:
+    # stesso video, due righe, due inferenze pagate — e invisibile all'utente,
+    # perché le due URL sono equivalenti per il browser. `hostname` normalizza da
+    # sé minuscole, credenziali e porta, quindi sostituisce anche lo `split` su
+    # `@` che stava qui prima.
+    #
+    # Perdere la porta non fonde risorse distinte: l'URL canonico forza già lo
+    # schema a `https`, quindi `http://x:8080` e `https://x` collassavano
+    # comunque, e `detect_platform` ammette solo gli host delle tre piattaforme
+    # supportate, dove una porta non standard non esiste.
+    host = parts.hostname
+    if not host:
         raise PicoxValidationError("URL del video non valido.")
 
-    host = parts.netloc.lower()
-    if "@" in host:  # credenziali nell'URL: non le propaghiamo
-        host = host.rsplit("@", 1)[-1]
     host = host.removeprefix("www.") if host not in _HOST_ALIASES else host
     host = _HOST_ALIASES.get(host, host)
 

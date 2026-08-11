@@ -18,6 +18,7 @@ import ipaddress
 import logging
 import mimetypes
 import os
+import re
 import shutil
 import socket
 import tempfile
@@ -25,7 +26,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Final
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 import httpx
 from fastapi.concurrency import run_in_threadpool
@@ -65,15 +66,71 @@ _TRACKING_PARAMS = frozenset(
     }
 )
 
-_HOST_ALIASES = {
-    "www.instagram.com": "instagram.com",
-    "m.instagram.com": "instagram.com",
-    "www.tiktok.com": "tiktok.com",
-    "m.tiktok.com": "tiktok.com",
-    "vm.tiktok.com": "tiktok.com",
-    "www.youtube.com": "youtube.com",
-    "m.youtube.com": "youtube.com",
-    "youtu.be": "youtube.com",
+@dataclass(frozen=True, slots=True)
+class _Piattaforma:
+    """Come si riconosce una piattaforma e come se ne scrive la forma canonica.
+
+    Aggiungerne una e' **una entry in `_PIATTAFORME`**, non una modifica a
+    `normalize_video_url`: la funzione non nomina alcuna piattaforma.
+
+    `canonico` e' un template formattato con i gruppi nominati catturati da
+    `percorsi`, e **deve restare un URL che apre davvero il video**: finisce in
+    `insights.video_url`, che `insight-card.tsx` rende come `href` cliccabile.
+    Non e' solo una chiave di cache, ed e' il vincolo che decide quanto si puo'
+    canonicalizzare (vedi la nota su A9 in SECURITY_AUDIT.md).
+    """
+
+    host: str
+    """Host canonico, gia' senza `www.`/`m.`."""
+
+    alias: frozenset[str]
+    """Host che condividono **lo stesso spazio di path**, quindi riscrivibili.
+
+    I domini di link brevi non vanno qui: `vm.tiktok.com/ZMabc` e
+    `tiktok.com/ZMabc` non sono lo stesso URL, e riscrivere il solo host produce
+    un indirizzo che non esiste.
+    """
+
+    percorsi: tuple[re.Pattern[str], ...]
+    """Forme di path equivalenti. Devono catturare gruppi **nominati**."""
+
+    canonico: str
+    """Template della forma canonica, es. `instagram.com/reel/{id}`."""
+
+
+_PIATTAFORME: tuple[_Piattaforma, ...] = (
+    _Piattaforma(
+        host="instagram.com",
+        alias=frozenset({"www.instagram.com", "m.instagram.com"}),
+        # Instagram serve lo stesso post sotto quattro path: `/p/` (formato
+        # storico), `/reel/`, `/reels/` (alias plurale) e `/tv/` (ex IGTV).
+        percorsi=(re.compile(r"^/(?:p|reel|reels|tv)/(?P<id>[A-Za-z0-9_-]+)/?$"),),
+        canonico="instagram.com/reel/{id}",
+    ),
+    _Piattaforma(
+        host="tiktok.com",
+        alias=frozenset({"www.tiktok.com", "m.tiktok.com"}),
+        # Lo username resta nella forma canonica: toglierlo darebbe una chiave
+        # piu' robusta — lo stesso video e' raggiungibile con username diversi —
+        # ma `tiktok.com/video/<id>` non e' un indirizzo che si apre, e questo
+        # valore viene mostrato all'utente come link. Vedi il trade-off aperto
+        # in SECURITY_AUDIT.md, voce A9.
+        percorsi=(re.compile(r"^/@(?P<utente>[^/]+)/video/(?P<id>\d+)/?$"),),
+        canonico="tiktok.com/@{utente}/video/{id}",
+    ),
+)
+
+# Host -> piattaforma, costruito una volta. Comprende l'host canonico stesso,
+# cosi' `instagram.com` e `www.instagram.com` passano dallo stesso ramo.
+_PIATTAFORMA_PER_HOST: dict[str, _Piattaforma] = {
+    nome: p for p in _PIATTAFORME for nome in (p.host, *p.alias)
+}
+
+# Riscritture di solo host, per gli URL che **non** combaciano con alcun path
+# canonico (una storia, un profilo, un formato nuovo): li' l'unica cosa certa e'
+# che `www.`/`m.` non cambiano la risorsa.
+_HOST_ALIASES: dict[str, str] = {
+    alias: p.host for p in _PIATTAFORME for alias in p.alias
 }
 
 # Le famiglie di parametri di tracciamento si riconoscono dal prefisso: `utm_*`
@@ -100,9 +157,33 @@ def _is_tracking_param(key: str) -> bool:
 def normalize_video_url(raw_url: str) -> str:
     """Forma canonica dell'URL, usata come chiave di cache e di dedup.
 
-    Rimuove i parametri di tracciamento, uniforma host e schema, elimina il
-    frammento e lo slash finale. I parametri superstiti restano ordinati, così
-    che `?a=1&b=2` e `?b=2&a=1` collassino sulla stessa chiave.
+    Ogni chiave diversa per lo stesso video è **un'analisi pagata due volte**:
+    `UNIQUE (user_id, video_url)` deduplica ciò che riceve, non ciò che
+    significa. Da qui l'insieme di equivalenze applicate qui sotto.
+
+    Due strati, e la distinzione conta:
+
+    * **per piattaforma** — se l'host è noto e il path combacia con una forma
+      prevista, si riscrive nella forma canonica dichiarata in `_PIATTAFORME`.
+      È qui che `/p/`, `/reel/`, `/reels/` e `/tv/` di Instagram collassano su
+      una chiave sola;
+    * **generico** — per tutto il resto: schema forzato a `https`, host
+      minuscolo senza porta né credenziali né punto finale, `www.`/`m.` tolti,
+      percent-encoding normalizzato, frammento e slash finale rimossi, parametri
+      di tracciamento scartati e i superstiti ordinati, così che `?a=1&b=2` e
+      `?b=2&a=1` diano la stessa chiave.
+
+    **Il risultato deve restare un URL che apre il video.** Finisce in
+    `insights.video_url`, che il frontend rende come link cliccabile: una chiave
+    più robusta ma non navigabile romperebbe quel link per ogni insight. È il
+    vincolo che limita quanto si può canonicalizzare senza separare la chiave
+    dal valore mostrato — vedi la voce A9 di `SECURITY_AUDIT.md`.
+
+    **Nessuna richiesta di rete.** I link brevi (`vm.tiktok.com`, `youtu.be`)
+    non si possono risolvere offline e restano quindi chiavi a sé: risolverli
+    richiederebbe una chiamata HTTP dentro il percorso di cache, con i suoi
+    timeout e i suoi fallimenti, su ogni richiesta — compresi i cache hit, che
+    oggi non costano nulla.
     """
     url = raw_url.strip()
     if not url:
@@ -127,12 +208,29 @@ def normalize_video_url(raw_url: str) -> str:
     if not host:
         raise PicoxValidationError("URL del video non valido.")
 
-    host = host.removeprefix("www.") if host not in _HOST_ALIASES else host
-    host = _HOST_ALIASES.get(host, host)
+    # Il punto finale di un FQDN risolve in DNS come l'host senza: `instagram.com.`
+    # e `instagram.com` sono la stessa risorsa, e senza questo `rstrip` erano due
+    # chiavi. `detect_platform` lo faceva già, qui mancava.
+    host = host.rstrip(".")
 
-    # `youtu.be/<id>` -> `youtube.com/shorts/<id>` non è una riscrittura sicura
-    # in generale, quindi ci si limita a normalizzare l'host e a tenere il path.
-    path = parts.path.rstrip("/") or "/"
+    # Percent-encoding: `%41` e `A` sono lo stesso carattere, quindi due scritture
+    # dello stesso path davano due chiavi. `unquote` una volta sola — decodificare
+    # ripetutamente corromperebbe un path che contiene un `%` letterale.
+    path = unquote(parts.path)
+
+    piattaforma = _PIATTAFORMA_PER_HOST.get(host)
+    if piattaforma is not None:
+        for pattern in piattaforma.percorsi:
+            trovato = pattern.match(path)
+            if trovato is not None:
+                return "https://" + piattaforma.canonico.format(**trovato.groupdict())
+
+    # Fuori dalle forme note — una storia, un profilo, un link diretto a un
+    # `.mp4`, o un formato di path che la piattaforma introdurrà domani — resta
+    # la normalizzazione generica. Non è un ripiego: è il ramo che deve
+    # continuare a funzionare per gli URL che nessuna regola prevede.
+    host = _HOST_ALIASES.get(host, host.removeprefix("www."))
+    path = quote(path.rstrip("/"), safe="/@:~!$&'()*+,;=") or "/"
 
     kept = sorted(
         (k, v)

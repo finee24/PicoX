@@ -33,6 +33,7 @@ from app.schemas.insights import CronCreatorResult, CronRunResponse
 from app.services.apify_service import ApifyService, ScrapedVideo, get_apify_service
 from app.services.gemini_service import GeminiService, get_gemini_service
 from app.services.job_lock import CRON_CHECK_UPDATES, acquire, release
+from app.services.media_service import canonical_cache_key
 from app.services.supabase_service import (
     db_errors,
     service_table,
@@ -129,24 +130,34 @@ async def _load_active_creators() -> list[dict[str, Any]]:
 async def _filter_already_analyzed(user_id: str, video_urls: list[str]) -> list[str]:
     """Rimuove gli URL già presenti in `insights` per quell'utente.
 
-    Il dedup è per `(user_id, video_url)`, come il vincolo di unicità: lo stesso
-    video analizzato da un altro utente non conta come già analizzato per questo.
+    Il dedup è per `(user_id, cache_key)`, **la stessa chiave** del vincolo di
+    unicità, del lock e della cache di lettura. Confrontare gli URL grezzi
+    riaccoderebbe un video già analizzato quando lo scraper lo restituisce sotto
+    una forma diversa da quella archiviata — e riaccodarlo significa ripagarlo,
+    sul percorso automatico invece che manuale.
+
+    Lo scoping resta per utente: lo stesso video analizzato da un altro account
+    non conta come già analizzato per questo.
     """
     if not video_urls:
         return []
 
+    per_chiave = {canonical_cache_key(url): url for url in video_urls}
+
     insights = await service_table("insights", user_id)
     async with db_errors("dedup insights"):
         result = await (
-            insights.select("video_url").in_("video_url", video_urls).execute()
+            insights.select("cache_key").in_("cache_key", list(per_chiave)).execute()
         )
 
-    existing = {
-        str(row["video_url"])
+    presenti = {
+        str(row["cache_key"])
         for row in (result.data or [])
-        if isinstance(row, dict) and row.get("video_url")
+        if isinstance(row, dict) and row.get("cache_key")
     }
-    return [url for url in video_urls if url not in existing]
+    # Si riparte dagli URL originali, non dalle chiavi: il chiamante deve poter
+    # risalire ai metadati già scaricati con `by_url`.
+    return [url for chiave, url in per_chiave.items() if chiave not in presenti]
 
 
 async def _run_job(

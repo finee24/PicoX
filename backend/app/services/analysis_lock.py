@@ -1,8 +1,16 @@
 """Lock a scadenza sulle analisi in corso.
 
 Impedisce che due richieste concorrenti sullo stesso `(utente, video,
-modalità)` paghino entrambe Apify e Gemini. Il vincolo `UNIQUE (user_id,
-video_url)` su `insights` deduplica la **riga**, non il **lavoro**: fra la
+modalità)` paghino entrambe Apify e Gemini.
+
+**La chiave è `cache_key`, non l'URL** (migration `0009`): due forme dello
+stesso video — su TikTok basta un username diverso nel path — hanno `video_url`
+diversi ed è corretto che li abbiano, perché è il valore mostrato all'utente.
+Se il lock arbitrasse su quello, quelle due richieste otterrebbero lock
+distinti e pagherebbero entrambe: il difetto che questo modulo esiste per
+chiudere, riaperto dalla porta di servizio. Lock e deduplica devono guardare
+la stessa stringa. Il vincolo `UNIQUE (user_id,
+cache_key)` su `insights` deduplica la **riga**, non il **lavoro**: fra la
 lettura della cache e la scrittura del risultato passa l'intera pipeline, e in
 quella finestra nulla fermava una seconda richiesta.
 
@@ -39,7 +47,7 @@ _TABLE = "analysis_locks"
 
 async def acquire(
     user_id: str,
-    video_url: str,
+    cache_key: str,
     mode: AnalysisMode,
     settings: Settings,
 ) -> bool:
@@ -63,7 +71,7 @@ async def acquire(
         async with db_errors("acquisizione lock analisi"):
             await locks.insert(
                 {
-                    "video_url": video_url,
+                    "cache_key": cache_key,
                     "analysis_mode": mode,
                     "locked_at": adesso.isoformat(),
                     "expires_at": scadenza.isoformat(),
@@ -85,7 +93,7 @@ async def acquire(
                     "expires_at": scadenza.isoformat(),
                 }
             )
-            .eq("video_url", video_url)
+            .eq("cache_key", cache_key)
             .eq("analysis_mode", mode)
             .lte("expires_at", adesso.isoformat())
             .execute()
@@ -96,13 +104,13 @@ async def acquire(
         logger.warning(
             "Lock analisi scaduto e sottratto per %s (modalità %s): "
             "il detentore precedente non lo ha rilasciato.",
-            video_url,
+            cache_key,
             mode,
         )
     return sottratto
 
 
-async def release(user_id: str, video_url: str, mode: AnalysisMode) -> None:
+async def release(user_id: str, cache_key: str, mode: AnalysisMode) -> None:
     """Rilascia il lock. Non solleva mai.
 
     È un'ottimizzazione del caso normale, non la garanzia: libera subito la
@@ -114,7 +122,7 @@ async def release(user_id: str, video_url: str, mode: AnalysisMode) -> None:
         locks = await service_table(_TABLE, user_id)
         await (
             locks.delete()
-            .eq("video_url", video_url)
+            .eq("cache_key", cache_key)
             .eq("analysis_mode", mode)
             .execute()
         )
@@ -122,7 +130,7 @@ async def release(user_id: str, video_url: str, mode: AnalysisMode) -> None:
         logger.warning(
             "Rilascio del lock analisi fallito per %s (modalità %s): "
             "scadrà da sé entro il TTL.",
-            video_url,
+            cache_key,
             mode,
             exc_info=False,
         )
@@ -131,7 +139,7 @@ async def release(user_id: str, video_url: str, mode: AnalysisMode) -> None:
 @asynccontextmanager
 async def analysis_lock(
     user_id: str,
-    video_url: str,
+    cache_key: str,
     mode: AnalysisMode,
     settings: Settings,
 ) -> AsyncIterator[bool]:
@@ -140,9 +148,9 @@ async def analysis_lock(
     Il rilascio avviene solo se lo si era ottenuto: rilasciare un lock altrui
     aprirebbe la finestra che questo modulo esiste per chiudere.
     """
-    ottenuto = await acquire(user_id, video_url, mode, settings)
+    ottenuto = await acquire(user_id, cache_key, mode, settings)
     try:
         yield ottenuto
     finally:
         if ottenuto:
-            await release(user_id, video_url, mode)
+            await release(user_id, cache_key, mode)

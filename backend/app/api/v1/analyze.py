@@ -36,7 +36,11 @@ from app.schemas.insights import InsightResponse
 from app.services.analysis_lock import analysis_lock
 from app.services.apify_service import ApifyService, ScrapedVideo, get_apify_service
 from app.services.gemini_service import GeminiService, get_gemini_service
-from app.services.media_service import download_to_temp, normalize_video_url
+from app.services.media_service import (
+    canonical_cache_key,
+    download_to_temp,
+    normalize_video_url,
+)
 from app.services.supabase_service import db_errors, scoped_client, service_table
 
 logger = logging.getLogger(__name__)
@@ -79,13 +83,18 @@ def _copre_la_modalita(record: InsightResponse, mode: AnalysisMode) -> bool:
 
 async def find_cached_insight(
     user_id: str,
-    video_url: str,
+    cache_key: str,
     *,
     access_token: str | None,
     settings: Settings,
     required_mode: AnalysisMode | None = None,
 ) -> InsightResponse | None:
-    """Cerca un insight già presente per `(user_id, video_url)`.
+    """Cerca un insight già presente per `(user_id, cache_key)`.
+
+    La chiave è `cache_key` e **non** `video_url` (migration `0009`): due forme
+    dello stesso video hanno URL diversi ed è corretto che li abbiano, perché
+    quello è il valore mostrato all'utente. Cercare per URL significherebbe non
+    trovare in cache un video già analizzato sotto un'altra forma, e ripagarlo.
 
     Con un JWT disponibile si usa il client scoped, così il RLS resta la rete di
     sicurezza sulla lettura. Il job cron non ha una sessione utente e ricade sul
@@ -103,14 +112,14 @@ async def find_cached_insight(
                     db.table("insights")
                     .select("*")
                     .eq("user_id", user_id)
-                    .eq("video_url", video_url)
+                    .eq("cache_key", cache_key)
                     .limit(1)
                     .execute()
                 )
         else:
             insights = await service_table("insights", user_id)
             result = await (
-                insights.select("*").eq("video_url", video_url).limit(1).execute()
+                insights.select("*").eq("cache_key", cache_key).limit(1).execute()
             )
 
     if not result.data:
@@ -136,6 +145,7 @@ def _build_insight_payload(
     analysis: VideoAnalysisResponse,
     *,
     video_url: str,
+    cache_key: str,
     mode: AnalysisMode,
     creator_id: UUID | str | None,
     thumbnail_url: str | None,
@@ -162,7 +172,11 @@ def _build_insight_payload(
     dato che `insights` non denormalizza l'handle.
     """
     payload: dict[str, Any] = {
+        # Due colonne, due mestieri: `video_url` è ciò che si mostra — finisce in
+        # un `href` cliccabile — e `cache_key` è ciò che identifica. Vedi la
+        # migration 0009.
         "video_url": video_url,
+        "cache_key": cache_key,
         "thumbnail_url": thumbnail_url,
         "analysis_mode": mode,
         "summary_data": (
@@ -278,15 +292,23 @@ async def perform_analysis(
     deduzione da `creator_id` o `scraped`, che oggi separano i due chiamanti
     solo per convenzione.
 
-    Il lavoro vero è protetto da un lock su `(user_id, video_url, mode)`: senza,
+    Il lavoro vero è protetto da un lock su `(user_id, cache_key, mode)`: senza,
     N richieste concorrenti sullo stesso video producono N inferenze Gemini e N
     run Apify per finire in un'unica riga, cioè si paga N volte un risultato
     solo. Chi non ottiene il lock non duplica la spesa: attende che il
     detentore finisca e ne restituisce il risultato.
+
+    **La chiave si deriva qui, una volta sola.** `cache_key` non è un parametro:
+    passarlo dall'esterno aprirebbe la possibilità che due chiamanti ne calcolino
+    versioni diverse, ed è esattamente la divergenza che la migration `0009`
+    esiste per chiudere — cache di lettura, upsert, lock e dedup del cron devono
+    guardare la stessa stringa.
     """
+    cache_key = canonical_cache_key(video_url)
+
     cached = await find_cached_insight(
         user_id,
-        video_url,
+        cache_key,
         access_token=access_token,
         settings=settings,
         required_mode=mode,
@@ -295,11 +317,11 @@ async def perform_analysis(
         logger.info("Cache hit su insights per l'utente %s", user_id)
         return await _assicura_attribuzione(cached, user_id, creator_id), True
 
-    async with analysis_lock(user_id, video_url, mode, settings) as ottenuto:
+    async with analysis_lock(user_id, cache_key, mode, settings) as ottenuto:
         if not ottenuto:
             atteso, _ = await _attendi_analisi_altrui(
                 user_id,
-                video_url,
+                cache_key,
                 mode,
                 access_token=access_token,
                 settings=settings,
@@ -312,7 +334,7 @@ async def perform_analysis(
         # che il lock esiste per evitare.
         cached = await find_cached_insight(
             user_id,
-            video_url,
+            cache_key,
             access_token=access_token,
             settings=settings,
             required_mode=mode,
@@ -330,6 +352,7 @@ async def perform_analysis(
         return await _esegui_analisi(
             user_id=user_id,
             video_url=video_url,
+            cache_key=cache_key,
             mode=mode,
             settings=settings,
             gemini=gemini,
@@ -342,7 +365,7 @@ async def perform_analysis(
 
 async def _attendi_analisi_altrui(
     user_id: str,
-    video_url: str,
+    cache_key: str,
     mode: AnalysisMode,
     *,
     access_token: str | None,
@@ -364,7 +387,7 @@ async def _attendi_analisi_altrui(
     scadenza = time.monotonic() + settings.analysis_lock_wait_seconds
     logger.info(
         "Analisi già in corso per %s (modalità %s): attesa del risultato.",
-        video_url,
+        cache_key,
         mode,
     )
 
@@ -373,7 +396,7 @@ async def _attendi_analisi_altrui(
 
         pronto = await find_cached_insight(
             user_id,
-            video_url,
+            cache_key,
             access_token=access_token,
             settings=settings,
             required_mode=mode,
@@ -389,6 +412,7 @@ async def _esegui_analisi(
     *,
     user_id: str,
     video_url: str,
+    cache_key: str,
     mode: AnalysisMode,
     settings: Settings,
     gemini: GeminiService,
@@ -422,6 +446,7 @@ async def _esegui_analisi(
     payload = _build_insight_payload(
         analysis,
         video_url=video_url,
+        cache_key=cache_key,
         mode=mode,
         creator_id=creator_id,
         thumbnail_url=thumbnail_url,
@@ -433,14 +458,18 @@ async def _esegui_analisi(
     insights = await service_table("insights", user_id)
     async with db_errors("upsert insight"):
         result = await (
-            insights.upsert(payload, on_conflict="user_id,video_url").execute()
+            # Il target segue il vincolo spostato dalla migration 0009. Il
+            # fix dell'omissione di `creator_id` resta valido: dipende da quali
+            # colonne stanno nel *payload*, non da quali stanno nel target, e
+            # `ON CONFLICT DO UPDATE SET` continua a toccare solo le presenti.
+            insights.upsert(payload, on_conflict="user_id,cache_key").execute()
         )
 
     if not result.data:
         # L'upsert non ha restituito la rappresentazione: rileggiamo la riga
         # invece di restituire un record parziale.
         stored = await find_cached_insight(
-            user_id, video_url, access_token=access_token, settings=settings
+            user_id, cache_key, access_token=access_token, settings=settings
         )
         if stored is None:
             raise RuntimeError("L'insight non risulta salvato dopo l'upsert.")

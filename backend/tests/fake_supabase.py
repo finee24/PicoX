@@ -396,11 +396,14 @@ class FakeQuery:
 # Vincoli UNIQUE della migration 0001.
 _UNIQUE_CONSTRAINTS: dict[str, tuple[str, ...]] = {
     "creators": ("user_id", "username", "platform"),
-    "insights": ("user_id", "video_url"),
+    # Spostato dalla migration 0009: la deduplica vive su `cache_key`, non
+    # sull'URL mostrato. Se il doppio tenesse il vincolo vecchio, i test sulla
+    # concorrenza passerebbero per una ragione che in produzione non esiste.
+    "insights": ("user_id", "cache_key"),
     # Primary key composita: è il vincolo su cui poggia il mutex, quindi il
     # doppio deve farla rispettare come il database, altrimenti i test sulla
     # concorrenza passerebbero per un motivo che in produzione non esiste.
-    "analysis_locks": ("user_id", "video_url", "analysis_mode"),
+    "analysis_locks": ("user_id", "cache_key", "analysis_mode"),
     # Stesso motivo, chiave singola: è `job_name` a garantire un giro di cron
     # per volta. Senza questo vincolo nel doppio, due esecuzioni sovrapposte
     # otterrebbero entrambe il lock e il test verde non direbbe nulla.

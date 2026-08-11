@@ -561,7 +561,9 @@ asserisce prima che la vecchia funzione desse due chiavi diverse. Coperti anche 
 casi che **non** devono collassare — il rischio speculare è fondere video
 distinti — l'idempotenza, e la garanzia che la chiave resti un URL navigabile.
 
-### Punto 2 — i link brevi: non risolti, e perché
+### Punto 2 — i link brevi: non risolti, **registrato come voce a sé**
+
+Voce a priorità bassa in `PROGRESS.md`. Nessun codice scritto.
 
 **Raccomandazione: restare offline.** Risolverli con una `HEAD` metterebbe una
 chiamata di rete nel percorso della **chiave di cache**, quindi su *ogni*
@@ -576,22 +578,41 @@ sull'URL risolto **dopo** lo scraping otterrebbe lo stesso risultato senza alcun
 richiesta aggiuntiva — ma tocca `perform_analysis` e il lock, quindi è un
 intervento a sé, non parte di A9.
 
-### Punto 3 — canonicalizzare sull'ID: il trade-off, **da decidere**
+### Punto 3 — canonicalizzare sull'ID: **FATTO** (migration `0009`, 11 agosto 2026)
 
-È più robusto, e non marginalmente: lo stesso video TikTok è raggiungibile con
-username diversi nel path, quindi due utenti che incollano lo stesso video da
-fonti diverse pagano oggi due analisi. Un ID lo chiuderebbe.
+`insights.cache_key` separa l'identità dal valore mostrato. `video_url` resta
+l'URL navigabile che il frontend rende come link; `cache_key` è `<host>:<id>`
+quando la piattaforma è nota — deliberatamente **non** un URL, così nessuno è
+tentato di usarla in un `href`.
 
-**Ma richiede di separare la chiave dal valore mostrato.** `tiktok.com/video/<id>`
-non è un indirizzo che si apre, e la colonna è renderizzata come link. Servirebbe:
+**Collisioni verificate prima del DDL**, nel punto esatto (dopo il backfill,
+prima del `NOT NULL`), dentro una transazione poi annullata: 1 riga, 0 senza
+chiave, **0 gruppi in collisione**, 0 righe che si perderebbero.
 
-- una colonna nuova (es. `canonical_key`) con lo `UNIQUE` spostato lì,
-- `video_url` che torna a conservare l'URL originale, per il link,
-- una migration con backfill delle righe esistenti.
+**`NULL` sarebbe stato l'errore naturale.** Un link diretto a un `.mp4` non ha un
+id da estrarre, ma in PostgreSQL **due `NULL` non collidono**: un vincolo di
+unicità su colonna nullable non deduplica proprio le righe che la lasciano vuota.
+Si ricade sull'URL normalizzato.
 
-**Non è una modifica alla normalizzazione: è una modifica di schema.** L'impatto
-pratico oggi è nullo (1 riga in `insights`), il che la rende anche il momento
-meno costoso per farla, se la si vuole.
+**`analysis_locks` è stata ri-chiavata, e senza quello la `0009` avrebbe
+riaperto la spesa duplicata.** Con la cache su `cache_key` e il lock su
+`video_url`, due richieste concorrenti sullo stesso video con username diversi
+otterrebbero **lock distinti**, procederebbero entrambe e pagherebbero entrambe:
+il difetto che la `0003` esiste per chiudere, riaperto dalla porta di servizio.
+Un `rename`, così PK e indice seguono — verificato dopo:
+`PK = (user_id, cache_key, analysis_mode)`. Il **meccanismo non cambia**.
+
+**Quattro punti allineati**, perché basta che uno solo diverga: cache di lettura
+(due rami), `ON CONFLICT`, lock, e il **dedup del cron** — quest'ultimo non era
+nella lista iniziale ed è emerso dalla ricognizione: senza, il cron
+riaccoderebbe un video già analizzato sotto altra forma, ripagandolo.
+
+**Il fix dell'omissione di `creator_id` regge** sulla clausola nuova, verificato
+da un test dedicato e non assunto: dipende da quali colonne stanno nel *payload*,
+non nel target.
+
+**9 test** in `tests/test_chiave_unificata.py`, incluso quello di concorrenza:
+due richieste parallele sui due URL → **1 sola inferenza**.
 
 **Dipendenza risolta**: la copertura di `normalize_video_url` differita con
 **A10** è inclusa in questi 51 test, ora che la funzione è ferma.
@@ -710,6 +731,25 @@ indipendenti: non è nel `PATH` di bash né di PowerShell, il servizio
 `com.docker.service` non esiste, e Docker Desktop non è presente nei percorsi di
 installazione standard. Non è un problema del `docker-compose.yml`: è l'assenza
 dello strumento con cui provarlo.
+
+**Verifica statica eseguita l'11 agosto 2026** (dichiarata tale: nulla è stato
+costruito né eseguito). Nome del pacchetto `ffmpeg` corretto e fornisce
+`ffprobe`, verificato sulla documentazione Debian; ordine dei layer corretto
+(dipendenze prima del codice); `apt-get update`/`install`/pulizia nello stesso
+`RUN`; `chown` dopo la copia e `USER` non privilegiato.
+
+**Un difetto trovato, e corretto**: `python:3.11-slim` **non pinnava la suite
+Debian**, e quel tag mappa oggi su **trixie** mentre puntava a bookworm —
+`ffmpeg` passa da 5.1 a 7.1 senza che nulla nel repository lo dichiari.
+
+Pinnato a `python:3.11-slim-trixie`. La scelta della suite merita una riga:
+pinnare era stato chiesto «alla suite in uso quando il runtime Docker fu
+introdotto **e testato**», ma quella suite **non esiste** — il `Dockerfile` è del
+6 agosto, mai modificato, non c'è alcun riferimento a una versione di `ffmpeg`
+verificata, e questa voce nasce proprio dal fatto che l'immagine non è mai stata
+costruita. Trixie è ciò che l'alias risolve oggi, quindi il pin **non cambia
+nulla** di ciò che un build produce: lo rende esplicito. Bookworm sarebbe stato
+un downgrade reale travestito da stabilizzazione.
 
 **Cosa serve per chiuderla**: installare Docker Desktop e rieseguire la verifica —
 build, presenza e funzionamento di `ffmpeg`/`ffprobe` dentro il container, `/health`
@@ -849,11 +889,11 @@ gestione abbonamento: Stripe fa tutte e tre. Il lavoro vero è in **A1**, **A3**
 | A6 | 500 fuori da `SafeRoute` senza header CORS | 5 | A | **fatto** | n/d | — |
 | A7 | Preflight CORS fuori dall'envelope | 5 | A | **chiusa per scelta**: non si corregge | n/d | — |
 | A8 | `netloc` invece di `hostname` nella chiave di cache | 1 | A | **fatto** | n/d | — |
-| A9 | Canonicalizzazione URL per piattaforma | 1 | A | **fatto**; resta aperta la scelta sull'ID (schema) | n/d | — |
+| A9 | Canonicalizzazione URL per piattaforma | 1 | A | **fatto**, ID compreso (`0009`); resta il solo punto 2 (link brevi), priorità bassa | n/d | — |
 | A10 | Nessun test su `_assert_public_target` (SSRF) e `normalize_video_url` | 1 | A | **fatto** — entrambe le parti | n/d | — |
 | A11 | `check_env.py`: non carica `.env`, crasha su cp1252 | 1 | A | **fatto** | n/d | — |
 | A12 | TODO minori frontend + `.env.example` disallineato | 1 | A | **fatto** (3 su 4; il quarto lasciato per scelta) | n/d | — |
-| A13 | `docker compose up` mai eseguito | 1 | A | **non verificabile**: Docker non installato sulla macchina | n/d | — |
+| A13 | `docker compose up` mai eseguito | 1 | A | **parziale**: verifica statica fatta e pin della distro corretto; end-to-end ancora bloccata da Docker assente | n/d | — |
 | A14 | PR cron da mergiare, `0005` da applicare, `CRON_ENABLED` | 6 | A | parziale | n/d — azione manuale | basso |
 | — | Chiave `service_role` trapelata e ruotata | 1 | — | **fatto** | — | — |
 | — | `profiles` scrivibile da `authenticated` (GRANT) | 1 | — | **fatto** (`0002`) | — | — |

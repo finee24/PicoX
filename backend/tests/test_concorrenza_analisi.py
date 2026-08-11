@@ -4,7 +4,7 @@ Due difetti distinti che nascevano dallo stesso punto — nessuna coordinazione
 fra richieste che scrivono sulla stessa riga di `insights` — e che vanno
 verificati separatamente, perché le garanzie sono diverse:
 
-1. **spesa**: `UNIQUE (user_id, video_url)` deduplica la riga, non il lavoro.
+1. **spesa**: `UNIQUE (user_id, cache_key)` deduplica la riga, non il lavoro.
    Prima della correzione, 3 POST concorrenti sullo stesso video producevano
    3 chiamate Gemini, 3 run Apify e 3 download per finire in 1 riga sola;
 2. **integrità**: l'upsert riscriveva `creator_id` a `NULL`, perché il payload
@@ -33,6 +33,8 @@ from tests.conftest import USER_ID, FakeApify, FakeGemini
 from tests.fake_supabase import FakeStore
 
 VIDEO_URL = "https://tiktok.com/@creator/video/123"
+# La chiave con cui il lock arbitra dalla migration 0009: non e' l'URL.
+CACHE_KEY = "tiktok.com:123"
 CREATOR_ID = "11111111-2222-3333-4444-555555555555"
 
 
@@ -248,14 +250,14 @@ async def test_un_lock_scaduto_viene_sottratto(store: FakeStore) -> None:
         "analysis_locks",
         {
             "user_id": USER_ID,
-            "video_url": VIDEO_URL,
+            "cache_key": CACHE_KEY,
             "analysis_mode": "BOTH",
             "locked_at": (scaduto - timedelta(minutes=30)).isoformat(),
             "expires_at": scaduto.isoformat(),
         },
     )
 
-    assert await lock_service.acquire(USER_ID, VIDEO_URL, "BOTH", get_settings())
+    assert await lock_service.acquire(USER_ID, CACHE_KEY, "BOTH", get_settings())
 
 
 async def test_un_lock_ancora_valido_non_viene_sottratto(store: FakeStore) -> None:
@@ -264,14 +266,14 @@ async def test_un_lock_ancora_valido_non_viene_sottratto(store: FakeStore) -> No
         "analysis_locks",
         {
             "user_id": USER_ID,
-            "video_url": VIDEO_URL,
+            "cache_key": CACHE_KEY,
             "analysis_mode": "BOTH",
             "locked_at": datetime.now(UTC).isoformat(),
             "expires_at": (datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
         },
     )
 
-    assert not await lock_service.acquire(USER_ID, VIDEO_URL, "BOTH", get_settings())
+    assert not await lock_service.acquire(USER_ID, CACHE_KEY, "BOTH", get_settings())
 
 
 async def test_il_lock_viene_rilasciato_quando_l_analisi_fallisce(
@@ -333,7 +335,7 @@ async def test_attesa_scaduta_risponde_409(
         "analysis_locks",
         {
             "user_id": USER_ID,
-            "video_url": VIDEO_URL,
+            "cache_key": CACHE_KEY,
             "analysis_mode": "BOTH",
             "locked_at": datetime.now(UTC).isoformat(),
             "expires_at": (datetime.now(UTC) + timedelta(minutes=10)).isoformat(),

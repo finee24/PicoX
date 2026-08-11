@@ -935,6 +935,81 @@ valore mostrato: colonna nuova, `UNIQUE` spostato, migration con backfill. È un
 modifica di schema, non di normalizzazione — **decisione aperta**, e oggi costa
 quanto non costerà mai più: 1 riga in `insights`.
 
+### ✅ RISOLTO — `cache_key`: l'identità del video separata dall'URL mostrato (A9, punto 3)
+
+Chiuso l'**11 agosto 2026**, migration `0009`. `UNIQUE (user_id, video_url)`
+faceva fare a una colonna due mestieri incompatibili: `video_url` finisce in un
+`href` cliccabile e deve restare navigabile, ma come **identità** vorrebbe
+unificare di più — lo stesso video TikTok è raggiungibile con **username diversi**
+nel path, e finché la chiave era l'URL si pagavano due analisi.
+
+**Collisioni verificate prima del DDL**, nel punto esatto (dopo il backfill,
+prima del `NOT NULL`), dentro una transazione poi annullata: 1 riga totale, 0
+senza chiave, **0 gruppi in collisione**, 0 righe che si perderebbero.
+
+**Perché non `NULL` per gli URL senza id.** Un link diretto a un `.mp4` non ha
+un id da estrarre, e lasciare `cache_key` a `NULL` sarebbe l'errore naturale: in
+PostgreSQL **due `NULL` non collidono**, quindi un vincolo di unicità su colonna
+nullable non deduplica proprio le righe che la lasciano vuota. Si ricade
+sull'URL normalizzato.
+
+**`analysis_locks` ri-chiavata, e non per coerenza estetica.** Con la cache su
+`cache_key` e il lock su `video_url`, due richieste concorrenti sullo stesso
+video con username diversi otterrebbero **lock distinti**, procederebbero
+entrambe e pagherebbero entrambe: il difetto che la `0003` esiste per chiudere,
+riaperto dalla porta di servizio. Un `rename` e non una colonna nuova, così PK,
+indice e privilegi seguono da soli — verificato dopo:
+`PK = (user_id, cache_key, analysis_mode)`. **Il meccanismo non cambia**:
+restano i due passi atomici e lo stesso TTL, cambia la stringa che fa da chiave.
+
+**Tutti e quattro i punti allineati**, perché basta che uno solo diverga:
+
+| Punto | Stato |
+|---|---|
+| `find_cached_insight` (due rami, scoped e service-role) | su `cache_key` |
+| `ON CONFLICT` dell'upsert | `user_id,cache_key` |
+| `analysis_locks` | ri-chiavata |
+| `_filter_already_analyzed` (dedup del cron) | su `cache_key` |
+
+L'ultimo non era nella lista iniziale ed è emerso dalla ricognizione: senza,
+il cron riaccoderebbe un video già analizzato sotto altra forma — **ripagandolo**,
+sul percorso automatico invece che manuale.
+
+La chiave si deriva **una volta sola** dentro `perform_analysis` e non è un
+parametro: passarla dall'esterno aprirebbe la possibilità che due chiamanti ne
+calcolino versioni diverse, cioè esattamente la divergenza da chiudere.
+
+**Il fix dell'omissione di `creator_id` regge** sulla clausola nuova, e non è
+dato per scontato: dipende da quali colonne stanno nel *payload*, non nel
+target. C'è un test che analizza con creator, rianalizza in altra modalità
+senza creator, e verifica che l'attribuzione sopravviva.
+
+**9 test** in `tests/test_chiave_unificata.py`, uno per punto più i gruppi di
+controllo — incluso quello di concorrenza: due richieste parallele sui due URL
+→ **1 sola inferenza**, risposte `200` e `201`.
+
+### ⚠️ PRIORITÀ BASSA — i link brevi non sono risolti (A9, punto 2)
+
+`vm.tiktok.com/ZMabc` e l'URL completo dello stesso video restano **due chiavi
+di cache distinte**: chi incolla il link breve paga un'analisi che esiste già.
+
+**Non risolto di proposito.** Una richiesta `HEAD` dentro `normalize_video_url`
+metterebbe una chiamata di rete nel percorso della chiave di cache, quindi su
+*ogni* richiesta — compresi i cache hit, che oggi non costano nulla — con i suoi
+timeout e i suoi fallimenti. E la funzione è oggi pura e sincrona, chiamata in
+cima a `perform_analysis`: renderla `async` e fallibile ne cambia il contratto
+ovunque.
+
+**La via migliore non richiede alcuna richiesta aggiuntiva.** Apify **risolve
+già** il link breve e restituisce l'URL canonico in `ScrapedVideo.video_url`:
+basterebbe ri-chiavare l'insight su quello **dopo** lo scraping, invece che
+sull'URL in ingresso. Tocca però `perform_analysis` e il lock — il lock viene
+preso *prima* di sapere l'URL risolto — quindi è un intervento a sé, non un
+dettaglio di A9.
+
+Da valutare insieme alla canonicalizzazione su ID (A9 punto 3): le due cose
+condividono la stessa domanda, cioè quale valore sia la chiave.
+
 ### ⏸️ A13 — verifica di `docker compose` **non eseguibile**
 
 Tentata l'11 agosto 2026. **Docker non è installato**, verificato su tre vie
@@ -946,6 +1021,38 @@ Conta più di quanto sembri: `render.yaml` usa `runtime: docker` con lo stesso
 `Dockerfile`, e la ragione dichiarata è che senza `ffmpeg` la durata del video
 non sarebbe verificabile e `MAX_VIDEO_DURATION_SECONDS` non verrebbe applicata.
 Quella catena non è mai stata provata end-to-end.
+
+#### Verifica **statica** del Dockerfile, 11 agosto 2026
+
+**Non sostituisce la verifica end-to-end**: nulla è stato costruito né eseguito.
+Si è controllato ciò che si può controllare leggendo.
+
+| Controllo | Esito |
+|---|---|
+| Nome del pacchetto `ffmpeg` | corretto, e **fornisce `ffprobe`** — verificato sulla documentazione Debian, non a memoria |
+| Ordine dei layer | corretto: `requirements.txt` copiato e installato **prima** del codice, quindi la cache delle dipendenze non si invalida a ogni modifica |
+| `apt-get` | `update`, `install` e `rm -rf /var/lib/apt/lists/*` nello **stesso** `RUN`: nessun layer con la cache apt dentro l'immagine |
+| Permessi | `chown -R` su `/app` **dopo** `COPY . .`, poi `USER picox`: la proprieta' e' corretta e il processo non gira da root |
+
+**Un difetto trovato, e corretto l'11 agosto: l'immagine base non era
+pinnata.** `python:3.11-slim` non fissa la suite Debian, e quel tag mappa oggi su
+**trixie** (Debian 13) mentre puntava a bookworm (Debian 12): lo stesso
+Dockerfile costruito a distanza di mesi produceva un sistema operativo diverso,
+e con esso un `ffmpeg` diverso, da 5.1 a 7.1.
+
+Pinnato a **`python:3.11-slim-trixie`**, e la scelta della suite merita una
+riga. Pinnare è stato chiesto «alla suite in uso quando il runtime Docker fu
+introdotto **e testato**»: quella suite **non esiste**. Il `Dockerfile` è del 6
+agosto e non è mai stato modificato, non c'è alcun riferimento a una versione di
+`ffmpeg` verificata, e questa voce nasce proprio dal fatto che
+`docker compose up` non è mai stato eseguito — non c'è un «già funzionante» da
+preservare. Trixie è ciò che l'alias risolve oggi, quindi il pin **non cambia
+nulla** di ciò che un build produce: lo rende esplicito. Tornare a bookworm
+sarebbe stato un downgrade reale travestito da stabilizzazione.
+
+**Nota minore, non un difetto**: `chown -R` riscrive i metadati di ogni file e
+duplica il layer di `/app`. `COPY --chown=picox:picox . .` lo eviterebbe, al
+prezzo di creare l'utente prima della copia. Irrilevante a questa dimensione.
 
 ### ⚠️ RISCHIO RESIDUO — attacco Sybil con più account
 

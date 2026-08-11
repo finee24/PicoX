@@ -42,10 +42,17 @@ Punti che spiegano il resto del codice:
 - **L'identità arriva sempre dal JWT verificato**, mai dal body o dalla query
   string. `AnalyzeVideoRequest` ha `extra="forbid"`: un `user_id` inviato dal
   client fa fallire la richiesta con 422 invece di essere ignorato in silenzio.
-- **`UNIQUE (user_id, video_url)` è una cache.** Ogni analisi costa una chiamata
+- **`UNIQUE (user_id, cache_key)` è una cache.** Ogni analisi costa una chiamata
   Apify e un'inferenza Gemini; il vincolo rende impossibile pagarla due volte
-  per lo stesso video. Perché regga, l'URL viene normalizzato prima di essere
-  usato come chiave (vedi `media_service.normalize_video_url`).
+  per lo stesso video. La chiave è distinta dall'URL mostrato perché i due hanno
+  vincoli opposti: `video_url` deve restare navigabile (il frontend lo rende
+  come link), `cache_key` deve unificare il più possibile — lo stesso video
+  TikTok è raggiungibile con username diversi nel path. Vedi
+  `media_service.canonical_cache_key`, e la voce A9 di `SECURITY_AUDIT.md`.
+- **La stessa chiave vale in quattro punti**: cache di lettura, target
+  dell'upsert, lock sulle analisi concorrenti e dedup del cron. Se anche uno
+  solo usasse un valore diverso, due richieste sullo stesso video passerebbero
+  per chiavi diverse e la spesa tornerebbe doppia.
 
 ### Struttura del monorepo
 
@@ -263,6 +270,22 @@ Dettagli, e cosa non è esprimibile in `vercel.json`, in
   ai *Redirect URLs*, altrimenti i link di conferma email rimandano a
   `localhost`.
 
+> ⚠️ **Se in questa stessa schermata configurerete un SMTP proprio** (Supabase →
+> Authentication → Emails → SMTP Settings), sappiate che state **rimuovendo una
+> protezione**, e nulla ve lo segnalerà.
+>
+> Oggi il signup di massa è di fatto limitato dalla quota di invio dell'SMTP
+> predefinito di Supabase — misurato: `HTTP 429 over_email_send_rate_limit`. Non
+> è un controllo di sicurezza, è un limite del mittente condiviso, e sparisce con
+> il primo provider proprio. Da quel momento la registrazione di N account
+> automatizzati torna praticabile, e con essa il costo N × il tetto per utente.
+>
+> È la voce **A4** di [`SECURITY_AUDIT.md`](SECURITY_AUDIT.md), dove ci sono le
+> quattro opzioni valutate (CAPTCHA, limite per IP o dominio, carta anche sul
+> piano gratuito, tetto di spesa lato provider). **Nessuna è implementata.**
+> Questa nota è qui, e non solo lì, perché chi configura l'SMTP sta guardando
+> questa pagina — non l'audit.
+
 Gli URL di preview di Vercel hanno un origin diverso per ogni branch e **non**
 sono ammessi dal CORS: è voluto. Per provare un branch contro un backend reale
 conviene un secondo servizio Render di staging con il proprio `FRONTEND_URL`.
@@ -351,6 +374,7 @@ erDiagram
         uuid creator_id FK "nullable, ON DELETE SET NULL"
         uuid user_id FK "ON DELETE CASCADE"
         text video_url
+        text cache_key
         text thumbnail_url
         text analysis_mode "INFO | STYLE | BOTH"
         jsonb summary_data
@@ -491,7 +515,8 @@ Output dell'analisi AI di un singolo video. È la tabella che cresce.
 | `id` | `uuid` | PK, `DEFAULT gen_random_uuid()` |
 | `creator_id` | `uuid` | **nullable**, FK → `creators(id)` `ON DELETE SET NULL` |
 | `user_id` | `uuid` | `NOT NULL`, FK → `auth.users(id)` `ON DELETE CASCADE` |
-| `video_url` | `text` | `NOT NULL` — chiave naturale del video |
+| `video_url` | `text` | `NOT NULL` — **cio' che si mostra**: finisce in un `href` cliccabile, quindi deve restare un URL navigabile |
+| `cache_key` | `text` | `NOT NULL` — **cio' che identifica**: `<host>:<id>` se la piattaforma è nota, altrimenti l'URL normalizzato. Non è un URL |
 | `thumbnail_url` | `text` | |
 | `analysis_mode` | `text` | `NOT NULL`, `CHECK IN ('INFO','STYLE','BOTH')` — modalità effettivamente eseguita |
 | `summary_data` | `jsonb` | Payload INFO |
@@ -530,8 +555,8 @@ un solo `DELETE` su `auth.users` soddisfa una richiesta di cancellazione dati.
 | `creators_user_id_idx` | `btree (user_id)` | Scoping per tenant: dashboard e ciclo del cron |
 | `insights_user_id_idx` | `btree (user_id)` | Scoping per tenant: feed dell'utente |
 | `insights_creator_id_idx` | `btree (creator_id)` | Feed di un singolo creator; evita il seq scan che il `SET NULL` in cascata richiederebbe a ogni DELETE su `creators` |
-| `insights_video_url_idx` | `btree (video_url)` | Lookup per URL a prescindere dall'utente |
-| `insights_user_id_video_url_key` | `UNIQUE (user_id, video_url)` | Vincolo di cache (sotto) — copre anche le query con prefisso `user_id` |
+| `insights_video_url_idx` | `btree (video_url)` | Lookup per URL a prescindere dall'utente. Residuo di quando `video_url` era anche la chiave: la deduplica passa ora dal vincolo su `cache_key` |
+| `insights_user_id_cache_key_key` | `UNIQUE (user_id, cache_key)` | Vincolo di cache (sotto) — copre anche le query con prefisso `user_id`, che sono tutte quelle del lookup |
 | `creators_user_id_username_platform_key` | `UNIQUE (user_id, username, platform)` | Idempotenza dell'aggiunta creator |
 
 Gli indici su `user_id` non servono solo alle query applicative: le policy RLS

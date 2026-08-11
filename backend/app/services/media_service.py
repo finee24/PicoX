@@ -155,7 +155,7 @@ def _is_tracking_param(key: str) -> bool:
 
 
 def normalize_video_url(raw_url: str) -> str:
-    """Forma canonica dell'URL, usata come chiave di cache e di dedup.
+    """Forma canonica dell'URL, usata come valore **mostrato** all'utente.
 
     Ogni chiave diversa per lo stesso video è **un'analisi pagata due volte**:
     `UNIQUE (user_id, video_url)` deduplica ciò che riceve, non ciò che
@@ -174,10 +174,12 @@ def normalize_video_url(raw_url: str) -> str:
       `?b=2&a=1` diano la stessa chiave.
 
     **Il risultato deve restare un URL che apre il video.** Finisce in
-    `insights.video_url`, che il frontend rende come link cliccabile: una chiave
-    più robusta ma non navigabile romperebbe quel link per ogni insight. È il
-    vincolo che limita quanto si può canonicalizzare senza separare la chiave
-    dal valore mostrato — vedi la voce A9 di `SECURITY_AUDIT.md`.
+    `insights.video_url`, che il frontend rende come link cliccabile.
+
+    Non è più *anche* la chiave di dedup: quella è `canonical_cache_key`, che
+    non ha il vincolo di essere navigabile e può quindi unificare di più. La
+    separazione fra «cosa si mostra» e «cosa identifica» è la voce A9 di
+    `SECURITY_AUDIT.md`.
 
     **Nessuna richiesta di rete.** I link brevi (`vm.tiktok.com`, `youtu.be`)
     non si possono risolvere offline e restano quindi chiavi a sé: risolverli
@@ -240,6 +242,47 @@ def normalize_video_url(raw_url: str) -> str:
     query = urlencode(kept)
 
     return urlunsplit(("https", host, path, query, ""))
+
+
+def canonical_cache_key(raw_url: str) -> str:
+    """Chiave con cui si decide se un video è **già stato analizzato**.
+
+    Distinta da `normalize_video_url`, e la distinzione è il punto: quella deve
+    restare un URL navigabile perché il frontend la rende come link, questa no.
+    Liberata da quel vincolo, unifica di più.
+
+    Il caso che motiva la separazione: lo stesso video TikTok è raggiungibile
+    con **username diversi** nel path — `tiktok.com/@tizio/video/123` e
+    `tiktok.com/@caio/video/123` aprono entrambi il video `123`. Come URL
+    mostrato sono due valori legittimi e diversi; come *identità* sono lo stesso
+    video, e senza questa funzione si pagherebbero due analisi.
+
+    Forma: `<host canonico>:<id>` quando la piattaforma è nota e il path
+    combacia — deliberatamente **non** un URL, così nessuno è tentato di usarla
+    in un `href`. Altrimenti si ricade sull'URL normalizzato, che resta la
+    migliore approssimazione disponibile: per un link diretto a un `.mp4` non
+    esiste un id da estrarre, e usare `NULL` toglierebbe la deduplica proprio
+    a quel caso, perché in Postgres due `NULL` non collidono.
+
+    **La stessa chiave vale per tutti e quattro i punti** che decidono se un
+    lavoro è già stato fatto: la cache di lettura, il target dell'upsert, il
+    lock sulle analisi concorrenti e il dedup del cron. Se anche uno solo di
+    essi usasse un valore diverso, due richieste sullo stesso video passerebbero
+    per chiavi diverse e la spesa tornerebbe doppia.
+    """
+    parti = urlsplit(normalize_video_url(raw_url))
+    host = (parti.hostname or "").rstrip(".")
+
+    piattaforma = _PIATTAFORMA_PER_HOST.get(host)
+    if piattaforma is not None:
+        for pattern in piattaforma.percorsi:
+            trovato = pattern.match(unquote(parti.path))
+            if trovato is not None:
+                identificativo = trovato.groupdict().get("id")
+                if identificativo:
+                    return f"{piattaforma.host}:{identificativo}"
+
+    return urlunsplit(parti)
 
 
 @dataclass(slots=True)

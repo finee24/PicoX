@@ -3,7 +3,22 @@
 # Immagine pronta per Render / Railway (entrambe passano la porta via $PORT).
 # =============================================================================
 
-FROM python:3.11-slim AS base
+# La suite Debian è pinnata di proposito. `python:3.11-slim` senza suffisso è un
+# alias mobile: puntava a bookworm e oggi punta a trixie, quindi lo stesso
+# Dockerfile costruito a distanza di mesi produceva un sistema operativo diverso
+# — e con esso un `ffmpeg` diverso, da 5.1 a 7.1.
+#
+# Per un'immagine la cui unica ragione di esistere è «serve `ffmpeg`», un cambio
+# di major del binario che la giustifica deve essere una decisione, non un
+# effetto collaterale di quando si è premuto build.
+#
+# Pinnata a **trixie** e non a bookworm: l'immagine non è mai stata costruita —
+# la verifica end-to-end di `docker compose` è la voce A13, ancora aperta —
+# quindi non esiste una versione "già funzionante" da preservare. Trixie è ciò
+# che l'alias risolve oggi, quindi questo pin **non cambia nulla** di ciò che un
+# build produce: lo rende soltanto esplicito. Tornare a bookworm sarebbe stato
+# un downgrade reale travestito da stabilizzazione.
+FROM python:3.11-slim-trixie AS base
 
 # - PYTHONDONTWRITEBYTECODE: niente .pyc in un filesystem effimero
 # - PYTHONUNBUFFERED: i log arrivano al collector senza attendere il flush

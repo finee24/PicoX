@@ -73,6 +73,10 @@ REQUIRED: dict[str, str] = {
 }
 
 # --- Facoltative ma con un default che raramente è quello giusto -------------
+# Attenzione: il report di questa sezione stampa il **valore**, perché per un
+# origin o per `development`/`production` è l'informazione utile. Non aggiungere
+# qui una variabile che contiene un segreto: va trattata come YOUTUBE_API_KEY in
+# `controlla_insidie`, che ne riporta solo la presenza.
 RECOMMENDED: dict[str, str] = {
     "FRONTEND_URL": "Unico origin ammesso dal CORS (default http://localhost:3000)",
     "ENVIRONMENT": "development | production (default development)",
@@ -189,7 +193,21 @@ def controlla_insidie(report: Report) -> None:
         else:
             report.ok(f"FRONTEND_URL è un origin valido ({frontend})")
 
-    # 5. Segreto del cron troppo corto per resistere a un tentativo a forza bruta.
+    # 5. YouTube: facoltativa, ma la sua assenza va detta prima e non scoperta
+    #    dal primo 503. Si riporta solo la lunghezza: è una credenziale, e
+    #    questo report finisce nei log di avvio della piattaforma.
+    youtube = os.environ.get("YOUTUBE_API_KEY", "")
+    if not youtube.strip():
+        report.avviso(
+            "YOUTUBE_API_KEY assente: la verifica dei canali YouTube risponderà 503. "
+            "Instagram e TikTok non sono interessati."
+        )
+    elif youtube.strip().lower() in PLACEHOLDERS:
+        report.errore("YOUTUBE_API_KEY contiene un segnaposto non compilato")
+    else:
+        report.ok(f"YOUTUBE_API_KEY ({len(youtube)} caratteri)")
+
+    # 6. Segreto del cron troppo corto per resistere a un tentativo a forza bruta.
     cron = os.environ.get("CRON_SECRET", "")
     if cron and len(cron) < 24:
         report.avviso(
@@ -197,7 +215,7 @@ def controlla_insidie(report: Report) -> None:
             "(es. `openssl rand -hex 32`)."
         )
 
-    # 6. In produzione i segreti da sviluppo non devono sopravvivere.
+    # 7. In produzione i segreti da sviluppo non devono sopravvivere.
     if os.environ.get("ENVIRONMENT", "").lower() in {"production", "prod"}:
         if "localhost" in frontend or "127.0.0.1" in frontend:
             report.errore(f"ENVIRONMENT=production ma FRONTEND_URL punta in locale ({frontend})")
@@ -226,6 +244,24 @@ def controlla_caricamento_settings(report: Report) -> None:
     report.ok(f"Configurazione valida (environment={impostazioni.environment})")
     report.ok(f"Origin CORS ammessi: {', '.join(impostazioni.cors_origins) or 'nessuno'}")
     report.ok(f"Modello Gemini: {impostazioni.gemini_model}")
+
+    # `analysis_prompt.yaml` è configurazione quanto le variabili d'ambiente, e
+    # si rompe negli stessi modi: un refuso in una chiave di piattaforma, una
+    # indentazione sbagliata. La differenza è quando lo si scopre — senza questo
+    # controllo, alla prima analisi, sotto forma di 503 servito a un utente.
+    # `sys.path` è già stato sistemato qui sopra.
+    try:
+        from app.services.prompt_loader import load_prompt_config
+
+        prompt = load_prompt_config()
+    except Exception as exc:  # noqa: BLE001 — senza prompt non c'è analisi
+        report.errore(f"prompts/analysis_prompt.yaml non caricabile: {type(exc).__name__}")
+        return
+
+    report.ok(
+        f"Prompt di analisi v{prompt.version} "
+        f"({len(prompt.platform_overrides)} override di piattaforma)"
+    )
 
 
 def main() -> int:

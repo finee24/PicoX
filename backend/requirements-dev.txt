@@ -16,3 +16,6 @@ pytest-asyncio>=0.24,<2.0
 # locale e fallisce in CI (o viceversa) è peggio di nessun lint.
 ruff>=0.6,<1.0
 mypy>=1.11,<2.0
+# PyYAML non spedisce annotazioni proprie: senza gli stub, `import yaml` in
+# `prompt_loader.py` è un errore di mypy, non un warning.
+types-PyYAML>=6.0,<7.0

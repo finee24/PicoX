@@ -47,22 +47,48 @@ app/
     exceptions.py            eccezioni di dominio, ognuna con il proprio status
   schemas/
     analysis.py              InfoAnalysis, StyleAnalysis, InverseScript, VideoAnalysisResponse
-    creators.py              CRUD dei creator
+    creators.py              CRUD dei creator, validazione di un account
     insights.py              feed, filtri, riepilogo del cron
+    scraping.py              ScraperResult: l'interfaccia comune degli scraper
   services/
     supabase_service.py      i due client + scoping obbligatorio del service-role
-    gemini_service.py        upload, inferenza, validazione, cleanup
+    gemini_service.py        upload o passthrough, inferenza, validazione, cleanup
     apify_service.py         scraping per piattaforma, normalizzato
+    youtube_service.py       Data API v3: channels.list e videos.list
+    content_scraper.py       uno scraper per piattaforma, un solo ScraperResult
+    creator_validation.py    esiste + è pubblico: parsing, cache, quota
+    prompt_loader.py         compone il prompt dal YAML + sezioni per modalità
     media_service.py         normalizzazione URL, download con limiti
   api/v1/
     analyze.py               POST /analyze-video (+ pipeline riusata dal cron)
-    creators.py              CRUD
+    creators.py              CRUD + POST /creators/validate
     insights.py              GET /insights
     cron.py                  POST /cron/check-updates
   middleware/
     error_handler.py         SafeRoute + handler globali
-prompts/                     prompt Gemini per modalità (base, info, style, script)
+prompts/
+  analysis_prompt.yaml       base, override per piattaforma, blocco di contesto
+  info.md style.md script.md sezioni innestate secondo la modalità richiesta
 ```
+
+### Il prompt si edita senza toccare il codice
+
+`prompts/analysis_prompt.yaml` tiene la parte che cambia spesso; le sezioni per
+modalità restano `.md` perché cambiano per conto proprio.
+`prompt_loader.build_analysis_prompt` le compone. Il file è letto una volta e
+tenuto in cache: dopo una modifica va riavviato il processo.
+
+**La forma della risposta non si descrive lì.** La impone
+`response_schema=VideoAnalysisResponse`, che `google-genai` converte in JSON
+Schema e invia insieme al video. Riscrivere lo schema nel prompt significa
+darne due al modello: quando divergono la risposta smette di validare e
+l'analisi finisce in `503` — su tutte le richieste, non su qualcuna.
+Nel YAML si scrive il criterio, non il contratto.
+
+`user_override_base_prompt` è predisposto per una futura personalizzazione per
+utente (un `base_prompt` su Supabase) e non è ancora usato. Sostituisce **solo**
+la base: modalità, override di piattaforma e delimitazione del contesto non sono
+personalizzabili, perché sono ciò che tiene la risposta dentro lo schema.
 
 ## Endpoint
 
@@ -71,6 +97,7 @@ prompts/                     prompt Gemini per modalità (base, info, style, scr
 | `GET` | `/health` | — | `{"status":"ok"}` |
 | `POST` | `/api/v1/analyze-video` | JWT | `201` se analizzato, `200` se già in cache |
 | `POST` | `/api/v1/creators` | JWT | `409` se già monitorato |
+| `POST` | `/api/v1/creators/validate` | JWT | esiste + è pubblico; cache 24h, quota giornaliera |
 | `GET` | `/api/v1/creators` | JWT | |
 | `PATCH` | `/api/v1/creators/{id}` | JWT | `analysis_mode`, `is_active` |
 | `DELETE` | `/api/v1/creators/{id}` | JWT | `204`; gli insight sopravvivono |
@@ -117,35 +144,49 @@ body, dalla query string o da un path param.
 
 ## Cosa manca prima di aprire al pubblico
 
-- **Rate limiting su `POST /analyze-video`.** È l'endpoint più costoso (download
-  fino a 200 MB più un'inferenza multimodale) ed è protetto solo dal JWT: un
-  utente autenticato può accodare analisi illimitate. Serve un limite per utente
-  o un contatore giornaliero su `profiles`.
+- ~~**Rate limiting su `POST /analyze-video`.**~~ Chiuso dalla migration `0008`:
+  quota giornaliera per piano, imposta dal trigger su `analysis_events`. Stesso
+  meccanismo sulla validazione dei creator (`0010`).
 - **DNS rebinding.** La guard sul download valida l'IP risolto a ogni hop, ma non
   fissa la connessione su quell'IP: una risposta DNS che cambia fra controllo e
   connessione resta teoricamente sfruttabile.
 
 ## Pipeline di analisi
 
-1. normalizzazione dell'URL — è la chiave di `UNIQUE (user_id, video_url)`, e
-   senza di essa lo stesso Reel con un `?igshid=` diverso viene pagato due volte;
-2. cache check su `(user_id, video_url)`: se c'è, si restituisce il record e
+1. normalizzazione dell'URL — è ciò da cui si deriva `cache_key`, e senza di essa
+   lo stesso Reel con un `?igshid=` diverso viene pagato due volte;
+2. cache check su `(user_id, cache_key)`: se c'è, si restituisce il record e
    nessun servizio esterno viene chiamato;
-3. risoluzione dei metadati via Apify (best effort: un fallimento non è fatale);
-4. download in un file temporaneo, interrotto appena si supera il limite di
-   dimensione; `422` se dimensione o durata eccedono. I redirect sono seguiti a
-   mano e **ogni hop** viene validato: un URL che risolve su un indirizzo non
-   pubblico viene rifiutato, altrimenti l'endpoint sarebbe un SSRF verso la rete
-   interna del container (`169.254.169.254`, `127.0.0.1`, RFC1918);
+3. **scraping** (`content_scraper.py`): uno scraper per piattaforma, un solo
+   `ScraperResult` in uscita. Best effort — un fallimento non è fatale, si tenta
+   comunque l'URL così com'è;
+4. **un solo bivio a valle** (`run_analysis`), su `youtube_url` contro
+   `video_bytes_url`:
+   - *passthrough* (YouTube) — l'URL va a Gemini in `file_data` e a scaricarlo è
+     Google. Nessun byte da noi, nessun file remoto da cancellare. Si usa solo se
+     `videos.list` ha confermato una durata entro il limite: senza download, è
+     l'unico momento in cui `MAX_VIDEO_DURATION_SECONDS` può essere applicato;
+   - *byte* (Instagram, TikTok, link diretti) — download in un file temporaneo,
+     interrotto appena si supera il limite di dimensione, poi upload sulla Files
+     API. `422` se dimensione o durata eccedono. I redirect sono seguiti a mano e
+     **ogni hop** viene validato: un URL che risolve su un indirizzo non pubblico
+     viene rifiutato, altrimenti l'endpoint sarebbe un SSRF verso la rete interna
+     del container (`169.254.169.254`, `127.0.0.1`, RFC1918);
 5. inferenza Gemini con `response_schema=VideoAnalysisResponse`, prompt composto
-   dalle sole sezioni pertinenti alla modalità;
+   da `prompt_loader` con le sole sezioni pertinenti alla modalità, più le
+   istruzioni della piattaforma e il blocco di contesto (autore, caption,
+   hashtag) — **delimitato come dato non fidato**, perché lo scrive il creator
+   del video e non l'utente di Picox. `fps` e `media_resolution` arrivano dal
+   preset della modalità: `INFO` campiona meno frame e a risoluzione più bassa,
+   `STYLE` e `BOTH` restano pieni perché misurano il montaggio;
 6. validazione Pydantic con **un retry**, poi `503` — sul database non si scrive
    nulla di non validato;
-7. `upsert` su `insights` con `on_conflict=user_id,video_url`, che assorbe anche
+7. `upsert` su `insights` con `on_conflict=user_id,cache_key`, che assorbe anche
    due richieste concorrenti sullo stesso video.
 
-File temporaneo locale e file remoto sulla Gemini File API vengono cancellati in
-`finally`, anche quando l'inferenza fallisce.
+Sul percorso con download, file temporaneo locale e file remoto sulla Gemini
+Files API vengono cancellati in `finally`, anche quando l'inferenza fallisce. Sul
+passthrough non c'è nulla da cancellare.
 
 ## Ricerca (`GET /api/v1/insights`)
 

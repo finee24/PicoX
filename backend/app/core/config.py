@@ -46,6 +46,20 @@ class Settings(BaseSettings):
     # Attesa massima perché il file caricato passi in stato ACTIVE.
     gemini_file_active_timeout_seconds: int = 120
 
+    # Frame al secondo campionati dal modello. È la leva più diretta sui token:
+    # ogni frame è tokenizzato una volta, quindi il costo scala linearmente col
+    # frame rate. Il default dell'API è 1.0.
+    #
+    # **Non scendere sotto 0.3-0.5 per il contenuto short-form**: Reel, Shorts e
+    # TikTok sono montati con tagli rapidi, e sotto quella soglia l'analisi dello
+    # stile perde i beat visivi che deve misurare — la durata dell'hook, la
+    # lunghezza media dell'inquadratura. Il validatore impone il pavimento.
+    gemini_video_fps: float = Field(default=1.0, ge=0.3, le=24.0)
+    # Frame rate delle analisi che non guardano il montaggio (modalità `INFO`):
+    # lì contano parlato, testo a schermo e argomento, che un campionamento più
+    # rado non perde.
+    gemini_video_fps_ridotto: float = Field(default=0.5, ge=0.3, le=24.0)
+
     # --- Apify ---------------------------------------------------------------
     apify_api_token: SecretStr
     apify_instagram_actor: str = "apify/instagram-scraper"
@@ -54,6 +68,28 @@ class Settings(BaseSettings):
     apify_timeout_seconds: int = 180
     # Quanti video recenti richiedere per creator a ogni giro di cron.
     apify_results_per_creator: int = 10
+    # Actor dedicato al *profilo* Instagram, distinto da quello sui post: quello
+    # sopra scrapa i contenuti di un URL e non espone `isPrivate`, che è
+    # esattamente il campo su cui la validazione decide.
+    apify_instagram_profile_actor: str = "apify/instagram-profile-scraper"
+    # Timeout più stretto di `apify_timeout_seconds`: un profilo è una singola
+    # pagina, non un dataset di video, e questa chiamata sta dentro una
+    # richiesta HTTP interattiva — l'utente sta guardando un input in loading.
+    apify_profile_timeout_seconds: int = Field(default=45, ge=5)
+
+    # --- YouTube Data API v3 --------------------------------------------------
+    # Solo per la validazione dei canali (`channels.list`): lo scraping dei
+    # video resta su Apify. Facoltativa — senza, la validazione YouTube risponde
+    # 503 e le altre due piattaforme continuano a funzionare.
+    youtube_api_key: SecretStr | None = None
+    youtube_api_timeout_seconds: int = Field(default=15, ge=1)
+
+    # --- Validazione dei creator ---------------------------------------------
+    # Quanto resta valida una riga di `creator_validations` prima di essere
+    # rivalidata. È una scelta di freschezza contro costo: un profilo che passa
+    # da pubblico a privato resta visto come pubblico al più per questa durata,
+    # e in cambio non si ripaga il provider a ogni chiamata.
+    creator_validation_ttl_hours: int = Field(default=24, ge=1)
 
     # --- Applicazione --------------------------------------------------------
     frontend_url: str = "http://localhost:3000"

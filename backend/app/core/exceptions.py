@@ -98,6 +98,29 @@ class AnalysisQuotaError(PicoxError):
     )
 
 
+class ValidationQuotaError(PicoxError):
+    """L'utente ha esaurito le validazioni di creator previste per oggi.
+
+    Terza sorella di `PlanLimitError` e `AnalysisQuotaError`, e distinta da
+    entrambe per lo stesso motivo per cui quelle due sono distinte fra loro: le
+    tre situazioni richiedono all'utente tre azioni diverse — rimuovere un
+    creator, aspettare domani per analizzare, aspettare domani per validare — e
+    un codice unico produrrebbe un messaggio generico proprio dove servono
+    istruzioni precise.
+
+    409 e non 429: non è una richiesta troppo frequente da rallentare, è una
+    quota esaurita. Un `Retry-After` suggerirebbe un ritentativo che fallirebbe
+    identico fino a domani.
+    """
+
+    status_code = 409
+    code = "validation_quota_reached"
+    default_message = (
+        "Hai raggiunto il numero massimo di verifiche di account giornaliere "
+        "previste dal tuo piano. La quota si azzera domani."
+    )
+
+
 class AnalysisInProgressError(PicoxError):
     """Un'altra richiesta sta già analizzando questo video per questo utente.
 
@@ -193,6 +216,29 @@ class ApifyError(ExternalServiceError):
 
     def __init__(self, message: str | None = None, *, details: Any | None = None) -> None:
         super().__init__(message, service="apify", details=details)
+
+
+class YouTubeError(ExternalServiceError):
+    """Fallimento della YouTube Data API, o chiave non configurata.
+
+    Codice proprio e non `apify_unavailable`: le due piattaforme passano da
+    provider diversi, e un messaggio che parla di Apify manderebbe chi indaga
+    un problema su YouTube a guardare il servizio sbagliato.
+
+    Anche la chiave assente finisce qui, con un 503: per il client la
+    piattaforma è indisponibile, ed è vero. Il fatto che la causa sia una
+    variabile d'ambiente resta nei log, dove serve a chi configura il deploy —
+    nel corpo della risposta sarebbe una descrizione dell'infrastruttura.
+    """
+
+    code = "youtube_unavailable"
+    default_message = (
+        "La verifica dei canali YouTube non è al momento disponibile. "
+        "Riprova tra qualche minuto."
+    )
+
+    def __init__(self, message: str | None = None, *, details: Any | None = None) -> None:
+        super().__init__(message, service="youtube", details=details)
 
 
 class DatabaseError(PicoxError):

@@ -29,7 +29,7 @@ from app.api.v1.analyze import perform_analysis
 from app.core.config import get_settings
 from app.core.exceptions import AnalysisInProgressError, GeminiError
 from app.services import analysis_lock as lock_service
-from tests.conftest import USER_ID, FakeApify, FakeGemini
+from tests.conftest import USER_ID, FakeApify, FakeGemini, FakeYouTube
 from tests.fake_supabase import FakeStore
 
 VIDEO_URL = "https://tiktok.com/@creator/video/123"
@@ -40,6 +40,10 @@ CREATOR_ID = "11111111-2222-3333-4444-555555555555"
 
 async def _analizza(**kwargs: Any):
     """I doppi non implementano i protocolli reali: il confine di tipo sta qui."""
+    # Questi test girano su URL TikTok, dove il servizio YouTube non viene mai
+    # interrogato: il doppio serve solo a soddisfare la firma, e ripeterlo in
+    # ogni chiamata aggiungerebbe rumore a test che parlano d'altro.
+    kwargs.setdefault("youtube", FakeYouTube())
     return await perform_analysis(**kwargs)
 
 

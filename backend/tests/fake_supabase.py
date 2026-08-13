@@ -42,6 +42,11 @@ _OWNER_COLUMN: dict[str, str] = {
     "insights": "user_id",
     "analysis_locks": "user_id",
     "analysis_events": "user_id",
+    "validation_events": "user_id",
+    # `creator_validations` **non** compare qui, e l'assenza è la sua
+    # definizione: è una cache condivisa senza proprietario (migration 0010).
+    # Elencarla con una colonna inventata farebbe passare i test su un modello
+    # di accesso che in produzione non esiste.
 }
 
 # Colonne nullable che il database restituisce comunque, anche quando l'INSERT
@@ -408,6 +413,11 @@ _UNIQUE_CONSTRAINTS: dict[str, tuple[str, ...]] = {
     # per volta. Senza questo vincolo nel doppio, due esecuzioni sovrapposte
     # otterrebbero entrambe il lock e il test verde non direbbe nulla.
     "job_locks": ("job_name",),
+    # Primary key della cache delle validazioni (migration 0010). Senza, un
+    # upsert che non trova la riga esistente ne aggiungerebbe una seconda per
+    # la stessa chiave, e il test sulla cache passerebbe leggendo la prima
+    # mentre in produzione ce n'è sempre e solo una.
+    "creator_validations": ("platform", "normalized_identifier"),
 }
 
 

@@ -1,19 +1,44 @@
 """Analisi multimodale del video con Gemini in structured output.
 
-Il flusso per ogni video:
+Due modi di dare un video al modello, e cambia solo la prima riga del flusso:
 
-1. upload del file locale sulla File API;
-2. attesa che il file passi in stato `ACTIVE` (l'inferenza su un file ancora in
-   `PROCESSING` fallisce);
-3. `generate_content` con `response_mime_type="application/json"` e
+* **byte** (Instagram, TikTok) — upload sulla Files API, attesa dello stato
+  `ACTIVE`, riferimento al file caricato;
+* **passthrough** (YouTube) — l'URL viene passato in `file_data` e a scaricarlo
+  è Google. Nessun byte transita da noi, nessun file da cancellare dopo.
+
+Da lì in poi il percorso è lo stesso:
+
+1. `generate_content` con `response_mime_type="application/json"` e
    `response_schema=VideoAnalysisResponse`;
-4. validazione Pydantic della risposta — **prima** che qualcosa raggiunga il
-   database;
-5. cancellazione del file remoto, garantita da un `finally`.
+2. validazione Pydantic della risposta — **prima** che qualcosa raggiunga il
+   database.
 
 Sul parsing è previsto **un solo retry**: il modello occasionalmente tronca il
 JSON, e un secondo tentativo lo risolve. Se fallisce anche quello si solleva
 `GeminiError` (503) e sul database non viene scritto nulla.
+
+Il testo del prompt non sta qui: lo compone `prompt_loader.build_analysis_prompt`
+a partire da `prompts/analysis_prompt.yaml`. Questo modulo decide *come* guardare
+il video (fps, risoluzione, passthrough), non *cosa* chiedergli.
+
+## Ridurre i token senza toccare i byte
+
+Il video non viene pre-elaborato da noi: niente ffmpeg, niente estrazione di
+frame. Le due leve sono native della chiamata e si sommano.
+
+* `video_metadata.fps` sul Part — quanti frame al secondo il modello campiona.
+  Ogni frame è tokenizzato una volta, quindi il costo scala **linearmente**:
+  metà frame rate, metà token dei frame.
+* `media_resolution` sulla config di generazione — quanti token vale un frame:
+  ~258 a risoluzione media, ~66 a `LOW`, indipendentemente dall'fps.
+
+Verificato contro `google-genai` 1.75.0, che è la versione installata:
+`GenerateContentConfig.media_resolution` esiste (per richiesta) e
+`VideoMetadata.fps` accetta un valore in `(0.0, 24.0]`, default 1.0. Nel Part
+esiste anche un `media_resolution` per parte, ma la documentazione ufficiale
+descrive quello per richiesta, e con un solo video per richiesta i due
+coinciderebbero comunque.
 
 Le regole complete sono in `.claude/skills/gemini-structured-output/SKILL.md`.
 """
@@ -22,8 +47,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from functools import lru_cache
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Final
 
 from google import genai
@@ -34,59 +58,60 @@ from pydantic import ValidationError
 from app.core.config import Settings, get_settings
 from app.core.exceptions import GeminiError
 from app.schemas.analysis import AnalysisMode, VideoAnalysisResponse
+from app.services.prompt_loader import AnalysisContext, build_analysis_prompt
 
 logger = logging.getLogger(__name__)
-
-# I prompt vivono fuori dal codice applicativo: si iterano senza toccare i
-# service (vedi il subagent .claude/agents/prompt-tuner.md).
-_PROMPTS_DIR: Final = Path(__file__).resolve().parents[2] / "prompts"
 
 _FILE_POLL_INTERVAL_SECONDS: Final = 2.0
 
 
-@lru_cache(maxsize=8)
-def _load_prompt(name: str) -> str:
-    path = _PROMPTS_DIR / f"{name}.md"
-    try:
-        return path.read_text(encoding="utf-8").strip()
-    except OSError as exc:
-        raise GeminiError(details=None) from exc
+@dataclass(frozen=True, slots=True)
+class PresetVideo:
+    """Quanto guardare un video, per una data modalità di analisi."""
+
+    fps: float
+    media_resolution: types.MediaResolution
 
 
-def build_prompt(mode: AnalysisMode) -> str:
-    """Compone il prompt con le sole sezioni pertinenti alla modalità.
+def preset_per_modalita(mode: AnalysisMode, settings: Settings) -> PresetVideo:
+    """Preset legato alla modalità già scelta dall'utente nel selettore.
 
-    Il modello riceve istruzioni solo per ciò che deve produrre; le sezioni
-    escluse sono elencate esplicitamente come `null` attesi, perché uno schema
-    con un campo nullable non basta a impedire che venga riempito.
+    Le tre modalità non sono un'etichetta di velocità ma di *contenuto*, e da lì
+    discende quanta risoluzione temporale serve davvero:
+
+    * `STYLE` e `BOTH` misurano il montaggio — durata dell'hook, lunghezza media
+      dell'inquadratura, tecniche di editing. Sono esattamente le cose che un
+      campionamento rado non vede: qui si resta al frame rate pieno;
+    * `INFO` estrae argomento, punti chiave e pubblico, che stanno nel parlato,
+      nel testo a schermo e nella scena. Dimezzare i frame e scendere a `LOW`
+      taglia i token di circa un ordine di grandezza senza togliere nulla a ciò
+      che quella modalità deve produrre.
+
+    I valori arrivano da `Settings`, quindi sono regolabili per preset da
+    variabile d'ambiente senza toccare il codice.
     """
-    sections = [_load_prompt("base")]
-    expected_null: list[str] = []
-
-    if mode in ("INFO", "BOTH"):
-        sections.append(_load_prompt("info"))
-    else:
-        expected_null.append("info_analysis")
-
-    if mode in ("STYLE", "BOTH"):
-        sections.append(_load_prompt("style"))
-    else:
-        expected_null.append("style_analysis")
-
-    if mode == "BOTH":
-        sections.append(_load_prompt("script"))
-    else:
-        expected_null.append("inverse_script")
-
-    if expected_null:
-        fields = ", ".join(f"`{name}`" for name in expected_null)
-        sections.append(
-            f"## Campi da lasciare vuoti\n\n"
-            f"Questa analisi è in modalità **{mode}**. I campi {fields} devono essere "
-            f"`null`. Non compilarli in nessun caso, nemmeno parzialmente."
+    if mode == "INFO":
+        return PresetVideo(
+            fps=settings.gemini_video_fps_ridotto,
+            media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW,
         )
+    return PresetVideo(
+        fps=settings.gemini_video_fps,
+        media_resolution=types.MediaResolution.MEDIA_RESOLUTION_MEDIUM,
+    )
 
-    return "\n\n---\n\n".join(sections)
+
+def build_video_part(file_uri: str, *, mime_type: str | None, fps: float) -> types.Part:
+    """Il Part del video, uguale per i due percorsi tranne che nel `mime_type`.
+
+    Su un URL YouTube il tipo **non** va dichiarato: il contenuto non è un file
+    che abbiamo caricato noi, e a risolverlo è Google. Su un file della Files API
+    invece serve, ed è quello con cui è stato caricato.
+    """
+    return types.Part(
+        file_data=types.FileData(file_uri=file_uri, mime_type=mime_type),
+        video_metadata=types.VideoMetadata(fps=fps),
+    )
 
 
 class GeminiService:
@@ -116,17 +141,47 @@ class GeminiService:
         video_path: str,
         mime_type: str,
         mode: AnalysisMode,
+        *,
+        context: AnalysisContext | None = None,
     ) -> VideoAnalysisResponse:
         """Analizza un video già scaricato in locale.
 
         Il file remoto viene cancellato in ogni caso: successo, errore di
         inferenza o eccezione durante la validazione.
         """
+        preset = preset_per_modalita(mode, self._settings)
         uploaded = await self._upload_and_wait(video_path, mime_type)
         try:
-            return await self._generate_with_retry(uploaded, mode)
+            part = build_video_part(
+                uploaded.uri or "", mime_type=uploaded.mime_type, fps=preset.fps
+            )
+            return await self._generate_with_retry(part, mode, preset, context)
         finally:
             await self._delete_remote_file(uploaded.name)
+
+    async def analyze_video_url(
+        self,
+        video_url: str,
+        mode: AnalysisMode,
+        *,
+        context: AnalysisContext | None = None,
+    ) -> VideoAnalysisResponse:
+        """Analizza un video YouTube senza scaricarlo.
+
+        L'URL viaggia in `file_data` e il download lo fa Google: nessun byte
+        passa da qui, nessun file resta sulla Files API da cancellare — e
+        infatti manca il `finally` che c'è nell'altro percorso, perché non c'è
+        nulla da ripulire.
+
+        **Solo YouTube.** Non è una restrizione nostra: è l'unica sorgente che
+        il modello sa risolvere da sé. Per Instagram e TikTok un URL passato qui
+        verrebbe rifiutato, e il chiamante deve mandare i byte.
+        """
+        preset = preset_per_modalita(mode, self._settings)
+        # Nessun `mime_type`: su un URL YouTube dichiararlo è un errore, il
+        # contenuto non è un file caricato da noi.
+        part = build_video_part(video_url, mime_type=None, fps=preset.fps)
+        return await self._generate_with_retry(part, mode, preset, context)
 
     # --- Upload --------------------------------------------------------------
 
@@ -186,13 +241,27 @@ class GeminiService:
     # --- Inferenza -----------------------------------------------------------
 
     async def _generate_with_retry(
-        self, uploaded: types.File, mode: AnalysisMode
+        self,
+        video: types.Part,
+        mode: AnalysisMode,
+        preset: PresetVideo,
+        context: AnalysisContext | None = None,
     ) -> VideoAnalysisResponse:
-        prompt = build_prompt(mode)
+        """L'inferenza, identica per i due percorsi.
+
+        Prende un `Part` già costruito e non sa se dietro ci sia un file
+        caricato o un URL YouTube: è il punto in cui le due strade si
+        ricongiungono, ed è ciò che permette di averne una sola da qui in giù.
+        """
+        prompt = build_analysis_prompt(mode, context)
         config = types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=VideoAnalysisResponse,
             temperature=0.4,
+            # Quanto vale un frame in token: ~258 a media risoluzione, ~66 a
+            # `LOW`. Si somma alla riduzione dell'fps, che agisce invece su
+            # *quanti* frame ci sono.
+            media_resolution=preset.media_resolution,
         )
 
         last_error: Exception | None = None
@@ -203,12 +272,7 @@ class GeminiService:
             try:
                 response = await self._client.aio.models.generate_content(
                     model=self._settings.gemini_model,
-                    contents=[
-                        types.Part.from_uri(
-                            file_uri=uploaded.uri or "", mime_type=uploaded.mime_type
-                        ),
-                        prompt,
-                    ],
+                    contents=[video, prompt],
                     config=config,
                 )
             except genai_errors.APIError as exc:

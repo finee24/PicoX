@@ -2,9 +2,14 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Loader2, Plus, Trash2, Users } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 
+import {
+  CreatorProfilePreview,
+  CreatorProfilePreviewSkeleton,
+  CreatorValidationFailure,
+} from "@/components/creator-profile-preview";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -33,12 +38,14 @@ import {
   fetchCreators,
   toUserMessage,
   updateCreator,
+  validateCreator,
 } from "@/lib/api";
 import {
   PLATFORM_LABELS,
   type AnalysisMode,
   type Creator,
   type CreatorListResponse,
+  type CreatorValidation,
   type Platform,
 } from "@/lib/types";
 
@@ -59,19 +66,90 @@ function AddCreatorForm() {
   const [platform, setPlatform] = useState<Platform>("instagram");
   const [mode, setMode] = useState<AnalysisMode>("BOTH");
   const [fieldError, setFieldError] = useState<string | null>(null);
+  const [validation, setValidation] = useState<CreatorValidation | null>(null);
+  const [validationFailure, setValidationFailure] = useState<string | null>(null);
+
+  // Ultimo valore per cui è partita una verifica. Serve a scartare le risposte
+  // superate dai fatti: due blur ravvicinati possono tornare in ordine inverso,
+  // e senza questo controllo la card mostrerebbe il profilo di ciò che c'era
+  // scritto prima.
+  const richiestaCorrente = useRef("");
+
+  const verificaAccount = useMutation({
+    mutationFn: (value: string) => validateCreator({ input: value, platform }),
+    onSuccess: (esito, value) => {
+      if (richiestaCorrente.current !== value) return;
+      setValidation(esito);
+      setValidationFailure(null);
+      setFieldError(null);
+      // Il link vince sul selettore: chi incolla un URL Instagram avendo
+      // "TikTok" selezionato intende Instagram, e il backend ha già validato
+      // quella piattaforma. Allineare il menu evita di creare il creator sulla
+      // piattaforma sbagliata subito dopo una verifica riuscita.
+      setPlatform(esito.platform);
+      // Il campo mostra l'handle estratto: chi ha incollato un URL vede cosa
+      // verrà effettivamente aggiunto. Il valore verificato diventa anche
+      // l'ultimo richiesto, altrimenti il blur successivo — su un campo che
+      // ora contiene l'handle e non più l'URL — rifarebbe la stessa verifica.
+      setUsername(esito.normalized_identifier);
+      richiestaCorrente.current = esito.normalized_identifier;
+    },
+    onError: (error, value) => {
+      if (richiestaCorrente.current !== value) return;
+      // Si dimentica il valore richiesto, così un secondo blur ritenta invece
+      // di essere scartato come "già verificato": una verifica fallita non ha
+      // verificato nulla.
+      richiestaCorrente.current = "";
+      setValidation(null);
+      // Un 422 riguarda ciò che è stato scritto — un link di un video, un host
+      // non supportato — e va accanto al campo, come già fanno 409 e 422 sulla
+      // creazione. Tutto il resto (quota esaurita, provider giù) riguarda il
+      // servizio e non il campo: si mostra come avviso, senza impedire nulla.
+      if (error instanceof ApiError && error.isValidation) {
+        setFieldError(toUserMessage(error));
+        setValidationFailure(null);
+        return;
+      }
+      setValidationFailure(toUserMessage(error));
+    },
+  });
+
+  /**
+   * Avvia la verifica per il valore indicato.
+   *
+   * Chiamata **solo** su gesti conclusi — blur e incolla — mai su `onChange`:
+   * dietro c'è un endpoint che paga Apify o consuma quota YouTube, quindi una
+   * verifica per tasto premuto sarebbe una chiamata pagata per lettera scritta.
+   */
+  function avviaVerifica(valore: string) {
+    const pulito = valore.trim();
+    // Già verificato: rifarlo costerebbe comunque una riga di quota, perché il
+    // tetto è per utente e non sa nulla della cache del browser.
+    if (!pulito || pulito === richiestaCorrente.current) return;
+    richiestaCorrente.current = pulito;
+    verificaAccount.mutate(pulito);
+  }
 
   const mutation = useMutation({
     mutationFn: () =>
       createCreator({
+        // Dopo una verifica riuscita si usa l'handle normalizzato dal backend:
+        // è la stessa stringa con cui l'account è stato trovato, quindi non può
+        // divergere da ciò che l'utente ha appena visto nella card.
         // La '@' iniziale la toglie anche il backend, ma inviarla pulita evita
         // che '@nome' e 'nome' sembrino due creator diversi in fase di errore.
-        username: username.trim().replace(/^@/, ""),
+        username: validation?.normalized_identifier ?? username.trim().replace(/^@/, ""),
         platform,
         analysis_mode: mode,
       }),
     onSuccess: (creator) => {
       setUsername("");
       setFieldError(null);
+      // La card si riferiva al creator appena aggiunto: lasciarla sotto a un
+      // campo ormai vuoto la farebbe sembrare l'anteprima del prossimo.
+      setValidation(null);
+      setValidationFailure(null);
+      richiestaCorrente.current = "";
       void queryClient.invalidateQueries({ queryKey: CREATORS_KEY });
       toast.success("Creator aggiunto", {
         description: `@${creator.username} è ora monitorato su ${PLATFORM_LABELS[creator.platform]}.`,
@@ -90,9 +168,16 @@ function AddCreatorForm() {
     },
   });
 
+  // La verifica è un aiuto, non un cancello: l'unico caso in cui blocca è
+  // l'account che il provider ha detto non esistere, dove aggiungere
+  // produrrebbe solo un creator che il cron non troverà mai. Un profilo
+  // privato, o una verifica non riuscita, lasciano l'utente libero di
+  // procedere.
+  const bloccatoDallaVerifica = validation !== null && !validation.exists;
+
   function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!username.trim() || mutation.isPending) return;
+    if (!username.trim() || mutation.isPending || bloccatoDallaVerifica) return;
     setFieldError(null);
     mutation.mutate();
   }
@@ -116,8 +201,22 @@ function AddCreatorForm() {
                 onChange={(e) => {
                   setUsername(e.target.value);
                   if (fieldError) setFieldError(null);
+                  // L'esito mostrato si riferisce a ciò che c'era scritto
+                  // prima: appena il testo cambia non descrive più nulla.
+                  setValidation(null);
+                  setValidationFailure(null);
                 }}
-                placeholder="@username"
+                onBlur={(e) => avviaVerifica(e.target.value)}
+                onPaste={(e) => {
+                  // Al momento dell'evento il campo contiene ancora il valore
+                  // vecchio: si legge al giro successivo, così un incolla su un
+                  // campo già pieno viene verificato per intero e non per la
+                  // sola parte incollata. `element` è il nodo DOM, che resta
+                  // valido oltre la vita dell'evento sintetico.
+                  const element = e.currentTarget;
+                  window.setTimeout(() => avviaVerifica(element.value), 0);
+                }}
+                placeholder="@username oppure link del profilo"
                 disabled={mutation.isPending}
                 aria-invalid={fieldError ? true : undefined}
                 aria-describedby={fieldError ? "creator-username-error" : undefined}
@@ -128,7 +227,17 @@ function AddCreatorForm() {
               <Label htmlFor="creator-platform">Piattaforma</Label>
               <Select
                 value={platform}
-                onValueChange={(next) => setPlatform(next as Platform)}
+                onValueChange={(next) => {
+                  setPlatform(next as Platform);
+                  // L'esito riguardava l'altra piattaforma: tenerlo visibile
+                  // farebbe aggiungere un creator su TikTok mostrando la card
+                  // del profilo Instagram. Si azzera anche l'ultimo valore
+                  // richiesto, così il blur successivo rifà la verifica —
+                  // stesso handle, piattaforma diversa, altra domanda.
+                  setValidation(null);
+                  setValidationFailure(null);
+                  richiestaCorrente.current = "";
+                }}
                 disabled={mutation.isPending}
               >
                 <SelectTrigger id="creator-platform" className="sm:w-44">
@@ -167,7 +276,16 @@ function AddCreatorForm() {
             <div className="flex items-end">
               <Button
                 type="submit"
-                disabled={!username.trim() || mutation.isPending}
+                disabled={
+                  !username.trim() ||
+                  mutation.isPending ||
+                  // Un click sul pulsante fa prima perdere il fuoco al campo,
+                  // quindi la verifica parte e questo lo disabilita per il
+                  // tempo della chiamata: l'utente clicca una seconda volta
+                  // avendo però visto l'esito, che è il punto della verifica.
+                  verificaAccount.isPending ||
+                  bloccatoDallaVerifica
+                }
                 className="w-full sm:w-auto"
               >
                 {mutation.isPending ? (
@@ -185,6 +303,14 @@ function AddCreatorForm() {
               {fieldError}
             </p>
           )}
+
+          {verificaAccount.isPending ? (
+            <CreatorProfilePreviewSkeleton />
+          ) : validation ? (
+            <CreatorProfilePreview validation={validation} />
+          ) : validationFailure ? (
+            <CreatorValidationFailure message={validationFailure} />
+          ) : null}
         </form>
       </CardContent>
     </Card>

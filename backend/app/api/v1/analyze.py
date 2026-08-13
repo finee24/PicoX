@@ -33,15 +33,19 @@ from app.core.security import CurrentUser
 from app.middleware.error_handler import SafeRoute
 from app.schemas.analysis import AnalysisMode, AnalyzeVideoRequest, VideoAnalysisResponse
 from app.schemas.insights import InsightResponse
+from app.schemas.scraping import ScraperResult
 from app.services.analysis_lock import analysis_lock
-from app.services.apify_service import ApifyService, ScrapedVideo, get_apify_service
+from app.services.apify_service import ApifyService, get_apify_service
+from app.services.content_scraper import scrape_content
 from app.services.gemini_service import GeminiService, get_gemini_service
 from app.services.media_service import (
     canonical_cache_key,
     download_to_temp,
     normalize_video_url,
 )
+from app.services.prompt_loader import AnalysisContext
 from app.services.supabase_service import db_errors, scoped_client, service_table
+from app.services.youtube_service import YouTubeService, get_youtube_service
 
 logger = logging.getLogger(__name__)
 
@@ -273,9 +277,10 @@ async def perform_analysis(
     settings: Settings,
     gemini: GeminiService,
     apify: ApifyService,
+    youtube: YouTubeService,
     access_token: str | None = None,
     creator_id: UUID | str | None = None,
-    scraped: ScrapedVideo | None = None,
+    scraped: ScraperResult | None = None,
     conta_quota: bool = True,
 ) -> tuple[InsightResponse, bool]:
     """Analizza un video e ne persiste il risultato.
@@ -357,6 +362,7 @@ async def perform_analysis(
             settings=settings,
             gemini=gemini,
             apify=apify,
+            youtube=youtube,
             access_token=access_token,
             creator_id=creator_id,
             scraped=scraped,
@@ -408,28 +414,50 @@ async def _attendi_analisi_altrui(
             raise AnalysisInProgressError()
 
 
-async def _esegui_analisi(
+async def run_analysis(
+    scraped: ScraperResult | None,
     *,
-    user_id: str,
     video_url: str,
-    cache_key: str,
     mode: AnalysisMode,
     settings: Settings,
     gemini: GeminiService,
-    apify: ApifyService,
-    access_token: str | None,
-    creator_id: UUID | str | None,
-    scraped: ScrapedVideo | None,
-) -> tuple[InsightResponse, bool]:
-    """La pipeline vera, eseguita col lock in mano."""
-    # Best effort: serve l'URL diretto del media, perché la pagina del post non
-    # è un file video. Un fallimento non è fatale — si tenta comunque l'URL
-    # originale, che per un link diretto a un .mp4 funziona.
-    if scraped is None:
-        scraped = await apify.resolve_video(video_url)
+) -> VideoAnalysisResponse:
+    """Dal video all'analisi, **indipendentemente dalla piattaforma**.
 
-    media_url = scraped.media_url if scraped is not None else video_url
-    thumbnail_url = scraped.thumbnail_url if scraped is not None else None
+    È l'unico punto in cui le piattaforme si distinguono, e la distinzione è una
+    sola riga: c'è un `youtube_url` oppure no. Tutto ciò che le rende diverse —
+    quale actor, quale API, quale forma di risposta — è già stato assorbito
+    dallo scraper, e qui non se ne trova traccia.
+
+    * **passthrough** — l'URL va a Gemini così com'è e a scaricarlo è Google.
+      Non c'è alcun byte che passi da qui, quindi nemmeno un `download_to_temp`
+      da cui far scattare i limiti: quelli li ha già applicati lo scraper, che
+      per questo motivo non fa passthrough se non conosce la durata
+      (`content_scraper`, docstring del modulo);
+    * **byte** — download in un file temporaneo con i limiti di dimensione e
+      durata, poi upload sulla Files API. È il percorso di Instagram e TikTok, e
+      anche di un link diretto a un `.mp4`, per cui `scraped` è `None`.
+    """
+    # Caption, hashtag e autore entrano nel prompt come *contesto*, delimitato
+    # come dato non fidato: li scrive il creator del video, non l'utente di
+    # Picox (`prompt_loader`, docstring del modulo). Senza scraping riuscito non
+    # c'è contesto da dare, e il prompt resta quello base.
+    contesto = AnalysisContext.da_scraping(scraped) if scraped is not None else None
+
+    if scraped is not None and scraped.youtube_url:
+        logger.info(
+            "Analisi avviata in passthrough su %s, modalità %s",
+            scraped.platform,
+            mode,
+        )
+        return await gemini.analyze_video_url(
+            scraped.youtube_url, mode, context=contesto
+        )
+
+    # Senza scraper riuscito si tenta comunque l'URL originale: per un link
+    # diretto a un file funziona, ed è il comportamento che il progetto aveva
+    # prima che gli scraper esistessero.
+    media_url = (scraped.video_bytes_url if scraped is not None else None) or video_url
     known_duration = scraped.duration_seconds if scraped is not None else None
 
     async with download_to_temp(
@@ -441,7 +469,43 @@ async def _esegui_analisi(
             f"{video.duration_seconds:.0f}s" if video.duration_seconds else "n/d",
             mode,
         )
-        analysis = await gemini.analyze_video(video.path, video.mime_type, mode)
+        return await gemini.analyze_video(
+            video.path, video.mime_type, mode, context=contesto
+        )
+
+
+async def _esegui_analisi(
+    *,
+    user_id: str,
+    video_url: str,
+    cache_key: str,
+    mode: AnalysisMode,
+    settings: Settings,
+    gemini: GeminiService,
+    apify: ApifyService,
+    youtube: YouTubeService,
+    access_token: str | None,
+    creator_id: UUID | str | None,
+    scraped: ScraperResult | None,
+) -> tuple[InsightResponse, bool]:
+    """La pipeline vera, eseguita col lock in mano."""
+    # Best effort: serve l'URL diretto del media, perché la pagina del post non
+    # è un file video — tranne su YouTube, dove serve l'URL stesso e null'altro.
+    # Un fallimento non è fatale: si tenta comunque l'URL originale.
+    if scraped is None:
+        scraped = await scrape_content(
+            video_url, apify=apify, youtube=youtube, settings=settings
+        )
+
+    thumbnail_url = scraped.thumbnail_url if scraped is not None else None
+
+    analysis = await run_analysis(
+        scraped,
+        video_url=video_url,
+        mode=mode,
+        settings=settings,
+        gemini=gemini,
+    )
 
     payload = _build_insight_payload(
         analysis,
@@ -508,6 +572,7 @@ async def analyze_video(
     settings: Annotated[Settings, Depends(get_settings)],
     gemini: Annotated[GeminiService, Depends(get_gemini_service)],
     apify: Annotated[ApifyService, Depends(get_apify_service)],
+    youtube: Annotated[YouTubeService, Depends(get_youtube_service)],
 ) -> InsightResponse:
     """Analizza il video indicato per conto dell'utente autenticato.
 
@@ -523,6 +588,7 @@ async def analyze_video(
         settings=settings,
         gemini=gemini,
         apify=apify,
+        youtube=youtube,
         access_token=user.access_token,
     )
 

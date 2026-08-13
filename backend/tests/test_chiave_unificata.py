@@ -31,7 +31,7 @@ from app.api.v1.analyze import find_cached_insight, perform_analysis
 from app.api.v1.cron import _filter_already_analyzed
 from app.core.config import get_settings
 from app.services.media_service import canonical_cache_key, normalize_video_url
-from tests.conftest import USER_ID, FakeApify, FakeGemini
+from tests.conftest import USER_ID, FakeApify, FakeGemini, FakeYouTube
 from tests.fake_supabase import FakeStore, make_jwt
 
 # Stesso video, due username diversi nel path: entrambi aprono il video 123.
@@ -43,8 +43,10 @@ CHIAVE = "tiktok.com:123"
 async def _analizza(**kwargs: Any) -> Any:
     """I doppi non implementano i protocolli reali: il confine di tipo sta qui.
 
-    Stesso schema di `test_concorrenza_analisi.py`.
+    Stesso schema di `test_concorrenza_analisi.py`, compreso il doppio YouTube
+    che qui non viene mai interrogato: gli URL sono TikTok.
     """
+    kwargs.setdefault("youtube", FakeYouTube())
     return await perform_analysis(**kwargs)
 
 

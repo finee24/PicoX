@@ -9,6 +9,8 @@ import type {
   CreatorCreatePayload,
   CreatorListResponse,
   CreatorUpdatePayload,
+  CreatorValidation,
+  CreatorValidationPayload,
   Insight,
   InsightListResponse,
   InsightQuery,
@@ -254,6 +256,27 @@ export async function deleteCreator(id: string): Promise<void> {
   await apiFetch<void>(`/api/v1/creators/${id}`, { method: "DELETE" });
 }
 
+/**
+ * `POST /api/v1/creators/validate`.
+ *
+ * Chiama API esterne a consumo e ha una quota giornaliera per utente: va
+ * invocata su un gesto concluso — blur, incolla — e **mai a ogni tasto**, che
+ * significherebbe una chiamata pagata per lettera scritta.
+ *
+ * `signal` serve a scartare la risposta di una verifica superata dai fatti:
+ * l'utente ha già cambiato quello che c'era scritto nel campo.
+ */
+export async function validateCreator(
+  payload: CreatorValidationPayload,
+  signal?: AbortSignal,
+): Promise<CreatorValidation> {
+  return apiFetch<CreatorValidation>("/api/v1/creators/validate", {
+    method: "POST",
+    body: payload,
+    signal,
+  });
+}
+
 // =============================================================================
 // Messaggi d'errore per la UI
 // =============================================================================
@@ -275,6 +298,10 @@ export function toUserMessage(error: unknown): string {
         return error.message;
       case "conflict":
         return "Questo creator è già nella tua watchlist.";
+      case "validation_quota_reached":
+        return "Hai esaurito le verifiche di account di oggi. Puoi comunque aggiungere il creator a mano.";
+      case "youtube_unavailable":
+        return "La verifica dei canali YouTube non è disponibile in questo momento.";
       case "gemini_unavailable":
         return "L'analisi non è disponibile in questo momento. Riprova tra qualche minuto.";
       case "apify_unavailable":

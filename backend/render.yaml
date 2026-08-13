@@ -105,6 +105,13 @@ services:
         value: "300"
       - key: APIFY_API_TOKEN
         sync: false
+      # Verifica dei canali YouTube (`channels.list`). Non dichiarata con
+      # `sync: false` obbligatorio ma **facoltativa**: se non viene impostata,
+      # la validazione YouTube risponde 503 e le altre due piattaforme
+      # continuano a funzionare. Restringerla alla sola YouTube Data API v3
+      # nella console Google: la quota è di 10.000 unità al giorno per progetto.
+      - key: YOUTUBE_API_KEY
+        sync: false
 
       # --- Autenticazione dello scheduler --------------------------------
       # Generata da Render, non scelta a mano: è il segreto dell'header

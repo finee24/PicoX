@@ -51,7 +51,7 @@ from app.services.supabase_service import (
     service_table,
     unscoped_service_table,
 )
-from app.services.youtube_service import YouTubeService
+from app.services.youtube_service import YouTubeService, is_channel_id
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +201,15 @@ def parse_creator_input(raw: str, platform: Platform | None) -> TargetValidazion
             "lo stesso username può esistere su Instagram, TikTok e YouTube."
         )
 
-    return TargetValidazione(platform, _normalizza_handle(testo))
+    # Un id di canale YouTube è case-sensitive, e qui arriva **nudo**: il ramo
+    # dell'URL lo riconosce dal prefisso `/channel/`, questo non ha alcun
+    # prefisso da guardare se non l'identificatore stesso. Senza questa riga
+    # `UCaaa…` diventava `ucaaa…`, non superava più `_is_channel_id`, finiva su
+    # `forHandle` e il canale risultava inesistente — un "non esiste" su un
+    # account che esiste, cioè il difetto che questa verifica esiste per evitare.
+    return TargetValidazione(
+        platform, _normalizza_handle(testo, minuscolo=not is_channel_id(testo.lstrip("@")))
+    )
 
 
 # =============================================================================

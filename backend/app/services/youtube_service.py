@@ -145,7 +145,47 @@ class YouTubeChannel:
     subscriber_count: int = 0
 
 
-def _is_channel_id(identifier: str) -> bool:
+def _motivo_errore(response: httpx.Response) -> str:
+    """Solo `error.errors[0].reason` dal corpo di un errore Google.
+
+    Il corpo intero non va nei log nemmeno troncato: può contenere frammenti
+    della richiesta, chiave compresa, e una chiave comparirebbe proprio nei
+    primi caratteri — quelli che il troncamento conserva. `reason` è un'enum
+    documentata (`quotaExceeded`, `keyInvalid`, `videoNotFound`) ed è l'unica
+    parte che serve a chi legge i log.
+
+    Una risposta che non è JSON (pagina d'errore di un proxy) non ha un motivo
+    da estrarre, e in quel caso lo status da solo dice già abbastanza.
+    """
+    try:
+        payload = response.json()
+    except ValueError:
+        return "corpo non JSON"
+
+    if not isinstance(payload, dict):
+        return "motivo non disponibile"
+
+    errore = payload.get("error")
+    if not isinstance(errore, dict):
+        return "motivo non disponibile"
+
+    dettagli = errore.get("errors")
+    if isinstance(dettagli, list) and dettagli and isinstance(dettagli[0], dict):
+        reason = dettagli[0].get("reason")
+        if isinstance(reason, str) and reason:
+            return reason
+
+    stato = errore.get("status")
+    return stato if isinstance(stato, str) and stato else "motivo non disponibile"
+
+
+def is_channel_id(identifier: str) -> bool:
+    """`True` per un id di canale (`UC` + 22 caratteri), non per un handle.
+
+    Pubblica perché la distinzione serve anche fuori da qui: è l'unico
+    identificatore YouTube **case-sensitive**, e chi lo normalizza deve saperlo
+    prima di abbassarlo (`creator_validation.parse_creator_input`).
+    """
     return (
         len(identifier) == _CHANNEL_ID_LENGTH
         and identifier.startswith(_CHANNEL_ID_PREFIX)
@@ -263,12 +303,12 @@ class YouTubeService:
         # Un handle e un id di canale sono parametri diversi della stessa
         # chiamata: passare un id a `forHandle` non trova nulla, ed è la forma
         # che arriva dagli URL `youtube.com/channel/UC…`.
-        if _is_channel_id(handle):
+        if is_channel_id(handle):
             params["id"] = handle
         else:
             params["forHandle"] = f"@{handle}"
 
-        payload = await self._get(params)
+        payload = await self._get(_CHANNELS_URL, params)
 
         items = payload.get("items")
         if not isinstance(items, list) or not items:
@@ -311,13 +351,14 @@ class YouTubeService:
             return None
 
         payload = await self._get(
+            _VIDEOS_URL,
             {
                 # `contentDetails` porta la durata, che è il motivo principale
                 # per cui questa chiamata esiste nel flusso principale.
                 "part": "snippet,contentDetails,statistics",
                 "id": video_id,
                 "key": self._settings.youtube_api_key.get_secret_value(),  # type: ignore[union-attr]
-            }
+            },
         )
 
         items = payload.get("items")
@@ -342,31 +383,39 @@ class YouTubeService:
             thumbnail_url=_best_thumbnail(snippet),
         )
 
-    async def _get(self, params: dict[str, str]) -> dict[str, Any]:
+    async def _get(self, url: str, params: dict[str, str]) -> dict[str, Any]:
         """Esegue la chiamata, traducendo ogni fallimento in `YouTubeError`.
+
+        **L'endpoint è un parametro e non una costante interna**, ed è una
+        correzione: con `_CHANNELS_URL` cablato qui dentro, `fetch_video`
+        mandava un id di video a `channels.list`. Quella chiamata non fallisce —
+        risponde `200` con `items` vuoto, perché un id di video non è un id di
+        canale — quindi `fetch_video` restituiva sempre `None` e il passthrough
+        YouTube non si apriva mai, pagando comunque un'unità di quota per ogni
+        analisi. Un errore silenzioso, e il tipo che due funzioni con un
+        trasporto condiviso rendono facile.
 
         Nessun dettaglio dell'errore raggiunge il client: il corpo di un errore
         Google contiene il motivo (`quotaExceeded`, `keyInvalid`) e a volte
-        frammenti della richiesta, **chiave compresa**. Resta nei log, troncato.
+        frammenti della richiesta, **chiave compresa**. Nei log finisce quindi
+        il solo `error.reason`, estratto dal JSON: il troncamento non era una
+        mitigazione, perché una chiave comparirebbe nei primi caratteri.
         """
         try:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(self._settings.youtube_api_timeout_seconds, connect=10.0),
                 headers={"User-Agent": "PicoxBot/1.0"},
             ) as client:
-                response = await client.get(_CHANNELS_URL, params=params)
+                response = await client.get(url, params=params)
         except httpx.HTTPError as exc:
             logger.error("YouTube Data API irraggiungibile: %s", type(exc).__name__)
             raise YouTubeError() from exc
 
         if response.status_code != httpx.codes.OK:
-            # `response.text` e non il json: un errore può non essere JSON
-            # affatto (pagina di errore di un proxy), e il troncamento vale in
-            # entrambi i casi.
             logger.error(
-                "YouTube Data API: status %s — %s",
+                "YouTube Data API: status %s (%s)",
                 response.status_code,
-                response.text[:300],
+                _motivo_errore(response),
             )
             raise YouTubeError()
 

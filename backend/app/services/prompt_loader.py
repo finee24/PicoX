@@ -18,14 +18,22 @@ scrive il criterio; il contratto è il modello Pydantic.
 
 Il contesto contiene la caption scritta dal creator del video, che non è
 l'utente di Picox e non ha alcun rapporto con lui: è un input non fidato che
-finisce nello stesso prompt delle istruzioni. Due cose lo tengono a bada:
+finisce nello stesso prompt delle istruzioni. Tre cose lo tengono a bada:
 
 * il `context_template` lo delimita in apertura **e** in chiusura, e dopo la
   chiusura rimette l'ultima parola al sistema — la caption è l'ultimo testo del
   prompt, la posizione da cui un'iniezione peserebbe di più;
+* i marcatori del blocco sono **irriproducibili dal testo che delimitano**:
+  `_neutralizza` collassa le sequenze di `=` nei valori. Senza, la delimitazione
+  era decorativa — i marcatori stanno in un file del repo, quindi chiunque può
+  scriverli in una caption e chiudere il blocco in anticipo;
 * la sostituzione avviene con `str.format` sul *template*, mai sui valori: una
   caption che contiene `{...}` finisce nel prompt come testo, non come
-  segnaposto da risolvere. È il motivo per cui non serve sanificarla oltre.
+  segnaposto da risolvere.
+
+Nessuna delle tre riscrive il *contenuto*: la caption resta leggibile, ed è
+giusto che lo sia, perché il modello la deve leggere. Ciò che viene tolto è solo
+la possibilità di fingersi struttura.
 """
 
 from __future__ import annotations
@@ -58,8 +66,24 @@ _SEPARATORE: Final = "\n\n---\n\n"
 # actor Apify che restituisca un blob al posto di una caption: senza, una
 # risposta anomala si trasformerebbe in token pagati a ogni analisi.
 _MAX_CAPTION_CHARS: Final = 2000
+_MAX_AUTORE_CHARS: Final = 100
 _MAX_HASHTAG: Final = 30
+# Il numero di tag era limitato, la loro **lunghezza** no: `#` seguito da
+# duecentomila caratteri di parola era un singolo hashtag che entrava intero nel
+# prompt, aggirando il tetto sulla caption dalla porta accanto.
+_MAX_HASHTAG_CHARS: Final = 60
 _HASHTAG_RE: Final = re.compile(r"#(\w+)")
+
+# I marcatori che delimitano il contesto sono letterali e pubblici — stanno in un
+# file del repo. Un delimitatore che il testo delimitato può riprodurre non
+# delimita niente: una caption che contiene la riga di chiusura chiude il blocco
+# in anticipo, e da lì in poi il testo del creator arriva al modello come se
+# fosse nostro. Le sequenze di `=` vengono quindi collassate nei valori, dove il
+# marcatore diventa irriproducibile.
+_MARCATORE_RE: Final = re.compile(r"={2,}")
+# C0 e DEL, tranne tab e a capo: in una caption non hanno significato e servono
+# solo a spezzare la struttura di ciò in cui vengono incollati.
+_CONTROLLI_RE: Final = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 # `Platform` è la nomenclatura interna; nel prompt va il nome che il modello
 # riconosce. "youtube_shorts" non è una parola che esiste fuori da questo repo.
@@ -133,11 +157,15 @@ class AnalysisContext(BaseModel):
         if autore and scraped.platform != "youtube_shorts":
             autore = f"@{autore.lstrip('@')}"
 
+        # Gli hashtag si estraggono dalla caption **gia' troncata**: prenderli
+        # da quella integra rimetteva in circolo, per un'altra strada, proprio i
+        # caratteri che il tetto sulla caption esisteva per lasciare fuori.
+        caption = _tronca(scraped.caption)
         return cls(
             platform=scraped.platform,
             creator_username=autore,
-            caption=scraped.caption,
-            hashtags=estrai_hashtag(scraped.caption),
+            caption=caption,
+            hashtags=estrai_hashtag(caption),
         )
 
 
@@ -153,20 +181,31 @@ def estrai_hashtag(caption: str | None) -> list[str]:
 
     visti: dict[str, None] = {}
     for tag in _HASHTAG_RE.findall(caption):
-        visti.setdefault(tag.lower(), None)
+        visti.setdefault(tag[:_MAX_HASHTAG_CHARS].lower(), None)
         if len(visti) >= _MAX_HASHTAG:
             break
     return list(visti)
 
 
-def _tronca(testo: str | None) -> str:
+def _tronca(testo: str | None, limite: int = _MAX_CAPTION_CHARS) -> str:
     if not testo:
         return ""
     pulito = testo.strip()
-    if len(pulito) <= _MAX_CAPTION_CHARS:
+    if len(pulito) <= limite:
         return pulito
-    logger.info("Caption troncata a %s caratteri per il prompt.", _MAX_CAPTION_CHARS)
-    return f"{pulito[:_MAX_CAPTION_CHARS]} […caption troncata]"
+    logger.info("Testo di contesto troncato a %s caratteri per il prompt.", limite)
+    return f"{pulito[:limite]} […troncato]"
+
+
+def _neutralizza(valore: str) -> str:
+    """Rende il valore incapace di riprodurre la struttura che lo contiene.
+
+    Non e' una sanificazione del contenuto — la caption resta leggibile e il
+    modello la deve leggere. Toglie solo i due strumenti con cui un testo puo'
+    fingersi struttura: le sequenze di `=` che compongono i marcatori, e i
+    caratteri di controllo.
+    """
+    return _MARCATORE_RE.sub("=", _CONTROLLI_RE.sub(" ", valore))
 
 
 def _riempi(template: str, **valori: str) -> str:
@@ -301,13 +340,21 @@ def build_analysis_prompt(
         if override is not None:
             sezioni.append(override.extra_instructions)
 
+        # Ogni valore che entra nel blocco passa da `_neutralizza`, compreso
+        # l'elenco degli hashtag: `AnalysisContext` puo' essere costruito anche
+        # senza passare da `da_scraping`, quindi la difesa sta qui — nell'unico
+        # punto da cui il testo di terzi raggiunge davvero il prompt — e non nel
+        # costruttore, che si puo' aggirare.
         sezioni.append(
             _riempi(
                 cfg.context_template,
                 platform=_ETICHETTA_PIATTAFORMA.get(context.platform, context.platform),
-                creator_username=context.creator_username or "(non disponibile)",
-                caption=_tronca(context.caption) or "(nessuna caption)",
-                hashtags=", ".join(context.hashtags) if context.hashtags else "(nessuno)",
+                creator_username=_neutralizza(
+                    _tronca(context.creator_username, _MAX_AUTORE_CHARS)
+                )
+                or "(non disponibile)",
+                caption=_neutralizza(_tronca(context.caption)) or "(nessuna caption)",
+                hashtags=_neutralizza(", ".join(context.hashtags)) or "(nessuno)",
             )
         )
 

@@ -341,8 +341,12 @@ def _servizio_youtube(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, dict[str, s
 
     catturati: dict[str, str] = {}
 
-    async def finto_get(params: dict[str, str]) -> dict[str, Any]:
+    async def finto_get(url: str, params: dict[str, str]) -> dict[str, Any]:
         catturati.update(params)
+        # L'URL viaggia insieme ai parametri proprio perche' un test lo possa
+        # osservare: e' l'unica cosa che distingueva `channels.list` da
+        # `videos.list`, ed era sbagliata senza che nulla lo dicesse.
+        catturati["__url__"] = url
         return {"items": []}
 
     servizio = YouTubeService()
@@ -366,6 +370,60 @@ async def test_un_handle_usa_il_parametro_forhandle(monkeypatch: pytest.MonkeyPa
 
     assert catturati.get("forHandle") == "@creator"
     assert "id" not in catturati
+
+
+async def test_i_metadati_di_un_video_interrogano_l_endpoint_videos(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IL DIFETTO CHE NESSUN TEST VEDEVA.
+
+    `_get` aveva l'URL di `channels.list` cablato dentro e lo usava per
+    entrambe le chiamate. Non falliva: un id di video mandato a `channels.list`
+    risponde 200 con `items` vuoto, perche' non e' un id di canale. Quindi
+    `fetch_video` restituiva sempre `None`, il passthrough YouTube non si apriva
+    mai in produzione, e ogni analisi bruciava comunque un'unita' di quota per
+    una chiamata che non poteva trovare nulla.
+
+    I test lo mancavano perche' guardavano i *parametri* e non l'URL, e perche'
+    piu' in alto `FakeYouTube` sostituisce l'intero servizio con un doppio che
+    un video lo restituisce.
+    """
+    servizio, catturati = _servizio_youtube(monkeypatch)
+
+    await servizio.fetch_video("dQw4w9WgXcQ")
+
+    assert catturati["__url__"].endswith("/videos"), "un id di video non va a channels.list"
+    assert catturati.get("id") == "dQw4w9WgXcQ"
+    assert "contentDetails" in catturati.get("part", ""), "senza durata il passthrough non parte"
+
+
+async def test_la_verifica_di_un_canale_interroga_l_endpoint_channels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    servizio, catturati = _servizio_youtube(monkeypatch)
+
+    await servizio.fetch_channel("creator")
+
+    assert catturati["__url__"].endswith("/channels")
+
+
+async def test_un_id_di_canale_digitato_a_mano_conserva_le_maiuscole() -> None:
+    """L'id di canale e' l'unico identificatore YouTube case-sensitive.
+
+    Dal link `youtube.com/channel/UC…` era gia' salvo, perche' li' il prefisso
+    `/channel/` lo annuncia. Digitato nudo non ha prefisso, veniva abbassato
+    come un handle qualsiasi, non superava piu' `is_channel_id` e finiva su
+    `forHandle`: un canale esistente veniva dichiarato inesistente.
+    """
+    from app.services.creator_validation import parse_creator_input
+
+    nudo = parse_creator_input("UCAbCdEfGhIjKlMnOpQrStUv", "youtube_shorts")
+    da_url = parse_creator_input("https://youtube.com/channel/UCAbCdEfGhIjKlMnOpQrStUv", None)
+    handle = parse_creator_input("@Creator", "youtube_shorts")
+
+    assert nudo.identifier == "UCAbCdEfGhIjKlMnOpQrStUv"
+    assert da_url.identifier == "UCAbCdEfGhIjKlMnOpQrStUv"
+    assert handle.identifier == "creator", "un handle resta case-insensitive"
 
 
 async def test_la_chiave_non_finisce_mai_in_un_parametro_diverso_da_key(

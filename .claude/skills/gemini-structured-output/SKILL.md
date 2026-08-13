@@ -156,6 +156,11 @@ istruzioni. Tre proprietà li tengono a bada:
   quelli che separano le sezioni, e dopo la chiusura una riga rimette l'ultima
   parola al sistema. La caption è l'ultimo testo del prompt: è la posizione da
   cui un'iniezione peserebbe di più;
+- i marcatori sono **irriproducibili dal testo che delimitano**. Stanno in un
+  file del repo, quindi sono pubblici: senza neutralizzare le sequenze di `=`
+  nei valori, una caption che riscrive la riga di chiusura chiude il blocco in
+  anticipo e da lì in poi parla al modello dalla posizione del sistema. Un
+  delimitatore che il dato può falsificare è decorazione;
 - la sostituzione avviene con `str.format` **sul template**, mai sui valori: una
   caption che contiene `{...}` resta testo e non diventa un segnaposto da
   risolvere. È il motivo per cui non serve sanificarla oltre;
@@ -173,4 +178,6 @@ istruzioni. Tre proprietà li tengono a bada:
 - [ ] `finally` che cancella file locale **e** file remoto (percorso con upload).
 - [ ] Nessun elenco di campi nel prompt: lo schema lo fornisce `response_schema`.
 - [ ] Caption e hashtag dentro i delimitatori, con la chiusura e la riga che segue.
+- [ ] Ogni valore di terzi neutralizzato (marcatori, caratteri di controllo) e
+      limitato in lunghezza — hashtag e nome dell'autore compresi, non solo la caption.
 - [ ] Nessuna `GEMINI_API_KEY` nei log o nei messaggi d'errore.

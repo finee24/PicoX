@@ -1307,6 +1307,44 @@ una costante proprio perché il calcolo non fosse una coincidenza.
 > `404 no longer available to new users`. Conferma la scelta di
 > `gemini-flash-latest` già in `render.yaml`.
 
+### ✅ RISOLTO — il lockfile del frontend rotto dalla major di npm sbagliata
+
+**15 agosto 2026.** Il job «Build del frontend» falliva su `npm ci` con
+`Missing: @emnapi/runtime@1.11.3 / @emnapi/core@1.11.3 from lock file`. Rotto
+dalla PR #7 (`e31e39d`): su `main` la CI passava.
+
+**È la seconda volta.** `.nvmrc` fissa Node 22, quindi CI e Vercel usano npm 10;
+la macchina di sviluppo gira su Node 24, quindi npm 11. Le due major registrano
+diversamente le dipendenze opzionali transitive, e `npm install react-icons`
+sotto npm 11 ha tolto dal lock due voci che npm 10 pretende. La prima volta era
+stata chiusa allineando la CI a `.nvmrc`; mancava però il lato di chi **scrive**
+il lockfile, ed è da lì che è rientrata.
+
+**Due strade che sembrano giuste e non lo sono**, verificate entrambe:
+
+* rigenerare con npm 11 non basta — npm 10 rifiuta comunque quel lock, perché
+  npm 11 annida quelle voci sotto `@tailwindcss/oxide-wasm32-wasi` invece di
+  tenerle in cima;
+* ricostruire da zero su Windows è peggio — spoglia il lock di tutte le
+  dipendenze delle altre piattaforme: −2905 righe, zero voci `@emnapi`.
+
+La forma che funziona è partire dal lock di `main` e aggiungerci il solo
+`react-icons` con npm 10: **+13 righe, nessuna rimozione**. Verificato con la
+configurazione esatta della CI — `npm@10 ci --dry-run --os=linux --cpu=x64`,
+exit 0 — e non per somiglianza.
+
+**La causa è stata rimossa, non solo l'effetto.** `frontend/.npmrc` con
+`engine-strict=true`: `engines.node` era dichiarato (`22.x`) ma npm si limitava
+a un avviso. Ora un `npm install` sulla major sbagliata **fallisce subito** con
+`EBADENGINE` e la versione attesa nel messaggio, invece di scrivere in silenzio
+un lockfile che si rompe solo in CI. Verificato che scatti su Node 24 e che non
+tocchi `npm run dev` / `lint` / `build`, che non sono comandi di installazione.
+
+> Conseguenza pratica: **per installare pacchetti nel frontend servono Node 22 e
+> npm 10** (`nvm use` legge `.nvmrc`). Alzare la versione resta legittimo, ma va
+> fatto in tre posti insieme — `.nvmrc`, `engines.node`, e il lockfile
+> rigenerato con la npm corrispondente — o si ricrea la stessa divergenza.
+
 ### ⚠️ APERTE — cinque voci non bloccanti dalla revisione di sicurezza della PR #7
 
 Giro di `security-reviewer` sull'intero diff della PR #7

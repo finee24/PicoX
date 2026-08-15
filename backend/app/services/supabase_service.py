@@ -196,16 +196,29 @@ async def scoped_client(
 
 
 # =============================================================================
-# Query service-role obbligatoriamente scopate
+# Query obbligatoriamente scopate
 # =============================================================================
 
 
-class ScopedServiceTable:
+class ScopedTable:
     """Builder che applica da sé il filtro sul proprietario a ogni operazione.
 
-    Non è una comodità: è il punto in cui la regola "ogni query service-role
-    filtra su `user_id`" smette di dipendere dalla memoria di chi scrive il
-    codice. Non espone un accesso grezzo alla tabella.
+    Non è una comodità: è il punto in cui la regola "ogni query filtra su
+    `user_id`" smette di dipendere dalla memoria di chi scrive il codice. Non
+    espone un accesso grezzo alla tabella.
+
+    Vale per **entrambi** i client, ed è il motivo per cui la classe non si
+    chiama più `ScopedServiceTable`. Ciò che cambia fra i due è solo la
+    conseguenza di un filtro dimenticato:
+
+    * col service-role (`service_table`) il RLS è scavalcato, e la query
+      restituirebbe le righe di tutti i tenant;
+    * col client dell'utente (`scoped_table`) il RLS regge e la fuga non
+      avviene — ma la query tornerebbe **vuota senza dirlo**, e un `404` al
+      posto di un risultato è un bug che si insegue a lungo.
+
+    Nessuna delle due è accettabile, e nessuna delle due va lasciata
+    all'attenzione di chi scrive la route.
     """
 
     __slots__ = ("_client", "_column", "_table", "_user_id")
@@ -213,8 +226,9 @@ class ScopedServiceTable:
     def __init__(self, client: AsyncClient, table: str, user_id: str) -> None:
         if not user_id:
             raise RuntimeError(
-                f"Tentativo di query service-role su '{table}' senza user_id: "
-                "senza RLS questo esporrebbe i dati di tutti i tenant."
+                f"Tentativo di query su '{table}' senza user_id: col client "
+                "service-role esporrebbe i dati di tutti i tenant, con quello "
+                "dell'utente restituirebbe zero righe senza segnalarlo."
             )
         self._client = client
         self._table = table
@@ -262,9 +276,34 @@ class ScopedServiceTable:
         return {**values, self._column: self._user_id}
 
 
-async def service_table(table: str, user_id: str) -> ScopedServiceTable:
+async def service_table(table: str, user_id: str) -> ScopedTable:
     """Unico accesso previsto alle tabelle col client service-role."""
-    return ScopedServiceTable(await _get_service_client(), table, user_id)
+    return ScopedTable(await _get_service_client(), table, user_id)
+
+
+@asynccontextmanager
+async def scoped_table(
+    table: str,
+    user_id: str,
+    access_token: str,
+    settings: Settings | None = None,
+) -> AsyncIterator[ScopedTable]:
+    """Come `service_table`, ma col client dell'utente e il RLS attivo.
+
+    È un context manager e non una semplice `async def` perché il client
+    scoped **va chiuso**: è costruito per richiesta (l'`Authorization` fa parte
+    della sua configurazione) e non condiviso come quello service-role.
+
+    Esiste per togliere l'ultima asimmetria del modulo. Fino a qui il filtro sul
+    proprietario era strutturale solo col service-role, mentre le route che
+    usano il JWT lo scrivevano a mano — `.eq("user_id", user.id)` ripetuto in
+    quattro punti, con il RLS come unica rete se qualcuno lo dimenticava. Il RLS
+    quella rete la fa davvero, ma il risultato di una dimenticanza è una lista
+    vuota o un 404 inspiegabile, non un errore: il tipo di difetto che si scopre
+    da un utente che segnala «non vedo più i miei dati».
+    """
+    async with scoped_client(access_token, settings) as client:
+        yield ScopedTable(client, table, user_id)
 
 
 async def unscoped_service_table(table: str, *, reason: str) -> AsyncRequestBuilder:

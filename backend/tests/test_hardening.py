@@ -196,7 +196,7 @@ def test_un_errore_imprevisto_non_espone_stack_trace_ne_dettagli(
     def esplode(*args: Any, **kwargs: Any):
         raise RuntimeError(f"connessione fallita con chiave {SEGRETO_FINTO}")
 
-    monkeypatch.setattr(insights_module, "scoped_client", esplode)
+    monkeypatch.setattr(insights_module, "scoped_table", esplode)
 
     with caplog.at_level(logging.ERROR):
         response = client.get("/api/v1/insights", headers=auth_headers)

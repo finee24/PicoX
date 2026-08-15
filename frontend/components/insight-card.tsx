@@ -11,7 +11,13 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
-import { formatDuration, insightTitle, relativeTime, shortenUrl } from "@/lib/format";
+import {
+  formatDuration,
+  formatSeconds,
+  insightTitle,
+  relativeTime,
+  shortenUrl,
+} from "@/lib/format";
 import { httpUrlOrNull } from "@/lib/safe-redirect";
 import {
   BEAT_SECTION_LABELS,
@@ -138,11 +144,11 @@ export function InsightCard({
                       label="Tipo di hook"
                       value={HOOK_TYPE_LABELS[style.hook_type] ?? style.hook_type}
                     />
-                    <Field label="Durata hook" value={`${Math.round(style.hook_duration_seconds)}s`} />
+                    <Field label="Durata hook" value={formatSeconds(style.hook_duration_seconds)} />
                     <Field label="Ritmo" value={PACING_LABELS[style.pacing] ?? style.pacing} />
                     <Field
                       label="Inquadratura media"
-                      value={`${style.average_shot_duration_seconds.toFixed(1)}s`}
+                      value={formatSeconds(style.average_shot_duration_seconds, 1)}
                     />
                   </div>
                   <Field label="Tono" value={style.tone_of_voice} />

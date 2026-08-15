@@ -71,6 +71,31 @@ export function formatFollowers(count: number): string {
   return COMPACT_FORMATTER.format(count);
 }
 
+/**
+ * Una misura in secondi con la sua unità: `3.2` → `"3.2s"`.
+ *
+ * Esiste per lo stesso motivo di `formatFollowers` qui sopra — la guardia su
+ * `Number.isFinite` — ma per un caso diverso. I campi di `style_data` arrivano
+ * da una colonna `jsonb` che contiene lo schema **in vigore al momento
+ * dell'analisi**: un record scritto prima che un campo esistesse non ce l'ha, e
+ * `undefined.toFixed()` non è un valore sbagliato, è un'eccezione che porta giù
+ * l'intera scheda dello stile.
+ *
+ * Oggi il caso non si presenta — tutti i record hanno i campi — ed è esattamente
+ * il motivo per cui era facile scriverlo senza guardia. `lib/types.ts` lo dice
+ * già nel commento in testa: quei payload vanno letti in modo difensivo.
+ *
+ * **Il separatore decimale resta il punto**, a differenza di `formatFollowers`
+ * che usa quello italiano (`Intl.NumberFormat("it")` → `"12,3 Mln"`).
+ * L'incoerenza è precedente a questa funzione ed è stata conservata di
+ * proposito: correggerla qui avrebbe cambiato ciò che l'utente legge dentro un
+ * intervento che non doveva cambiare nulla. Va decisa a parte.
+ */
+export function formatSeconds(seconds: number | undefined, decimali = 0): string {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return "—";
+  return `${seconds.toFixed(decimali)}s`;
+}
+
 /** Secondi → "1:23". */
 export function formatDuration(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return "—";

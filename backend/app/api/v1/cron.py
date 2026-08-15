@@ -29,8 +29,10 @@ from app.core.exceptions import ApifyError, PicoxError
 from app.core.security import verify_cron_enabled, verify_cron_secret
 from app.middleware.error_handler import SafeRoute
 from app.schemas.analysis import AnalysisMode
+from app.schemas.creators import Platform
 from app.schemas.insights import CronCreatorResult, CronRunResponse
 from app.services.apify_service import ApifyService, ScrapedVideo, get_apify_service
+from app.services.content_scraper import da_video_scrapato
 from app.services.gemini_service import GeminiService, get_gemini_service
 from app.services.job_lock import CRON_CHECK_UPDATES, acquire, release
 from app.services.media_service import canonical_cache_key
@@ -39,6 +41,7 @@ from app.services.supabase_service import (
     service_table,
     unscoped_service_table,
 )
+from app.services.youtube_service import YouTubeService, get_youtube_service
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +104,10 @@ class _AnalysisJob:
     creator_id: str
     video_url: str
     mode: AnalysisMode
+    platform: Platform
+    # Resta la forma dello scraper Apify e non `ScraperResult`: la conversione
+    # avviene in `_run_job`, che ha le `Settings` necessarie a decidere se un
+    # video YouTube può andare in passthrough.
     scraped: ScrapedVideo
 
 
@@ -165,6 +172,7 @@ async def _run_job(
     settings: Settings,
     gemini: GeminiService,
     apify: ApifyService,
+    youtube: YouTubeService,
 ) -> None:
     """Esegue una singola analisi in background.
 
@@ -179,8 +187,9 @@ async def _run_job(
             settings=settings,
             gemini=gemini,
             apify=apify,
+            youtube=youtube,
             creator_id=job.creator_id,
-            scraped=job.scraped,
+            scraped=da_video_scrapato(job.scraped, job.platform, settings=settings),
             # Il cron non consuma la quota manuale dell'utente: ha gia' il
             # proprio budget, imposto dal tetto ai creator attivi. Due budget
             # indipendenti, ognuno con un proprietario chiaro — altrimenti un
@@ -211,6 +220,7 @@ async def _run_queued_analyses(
     settings: Settings,
     gemini: GeminiService,
     apify: ApifyService,
+    youtube: YouTubeService,
 ) -> None:
     """Esegue le analisi accodate con parallelismo limitato.
 
@@ -220,7 +230,7 @@ async def _run_queued_analyses(
     """
     async def _guarded(job: _AnalysisJob) -> None:
         async with _semaforo_analisi(settings.cron_max_concurrent_analyses):
-            await _run_job(job, settings, gemini, apify)
+            await _run_job(job, settings, gemini, apify, youtube)
 
     logger.info("Cron: avvio di %s analisi in background.", len(jobs))
     await asyncio.gather(*(_guarded(job) for job in jobs))
@@ -232,6 +242,7 @@ async def _esegui_e_rilascia(
     settings: Settings,
     gemini: GeminiService,
     apify: ApifyService,
+    youtube: YouTubeService,
 ) -> None:
     """Le analisi in background, e **poi** il rilascio del lock.
 
@@ -246,7 +257,7 @@ async def _esegui_e_rilascia(
     scadenza del TTL per un errore gia' gestito altrove.
     """
     try:
-        await _run_queued_analyses(jobs, settings, gemini, apify)
+        await _run_queued_analyses(jobs, settings, gemini, apify, youtube)
     finally:
         await release(CRON_CHECK_UPDATES)
 
@@ -270,7 +281,7 @@ async def _censisci_creator(
     creator_id = str(creator["id"])
     user_id = str(creator["user_id"])
     username = creator["username"]
-    platform = creator["platform"]
+    platform: Platform = creator["platform"]
     mode: AnalysisMode = creator.get("analysis_mode") or "BOTH"
 
     def fallito(errore: str, videos_found: int = 0) -> tuple[CronCreatorResult, list[_AnalysisJob]]:
@@ -314,6 +325,7 @@ async def _censisci_creator(
             creator_id=creator_id,
             video_url=url,
             mode=mode,
+            platform=platform,
             scraped=by_url[url],
         )
         for url in new_urls
@@ -351,6 +363,7 @@ async def check_updates(
     settings: Annotated[Settings, Depends(get_settings)],
     gemini: Annotated[GeminiService, Depends(get_gemini_service)],
     apify: Annotated[ApifyService, Depends(get_apify_service)],
+    youtube: Annotated[YouTubeService, Depends(get_youtube_service)],
 ) -> CronRunResponse:
     """Cerca video nuovi per ogni creator attivo e ne accoda l'analisi.
 
@@ -407,7 +420,9 @@ async def check_updates(
         )
 
         if jobs:
-            background_tasks.add_task(_esegui_e_rilascia, jobs, settings, gemini, apify)
+            background_tasks.add_task(
+                _esegui_e_rilascia, jobs, settings, gemini, apify, youtube
+            )
             rilascia_qui = False
 
         return risposta

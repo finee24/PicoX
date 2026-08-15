@@ -23,13 +23,39 @@ const MODE_OPTIONS: { value: AnalysisMode; label: string }[] = [
   { value: "STYLE", label: "Solo stile" },
 ];
 
+interface AnalyzeInputProps {
+  initialUrl?: string;
+  /**
+   * Il link è arrivato a una forma stabile: blur o incolla, **mai** un tasto
+   * premuto. Dietro c'è una verifica che chiama API a consumo.
+   */
+  onUrlSettled?: (url: string) => void;
+  /** Il link è cambiato: quanto mostrato sotto la barra non lo descrive più. */
+  onUrlChanged?: () => void;
+  /**
+   * Analisi impedita da una verifica: l'autore non esiste o è privato, quindi
+   * il video non è scaricabile e l'analisi fallirebbe **dopo** aver pagato.
+   */
+  blocked?: boolean;
+}
+
 /**
  * Input rapido per analizzare un link.
  *
  * `initialUrl` arriva dallo share target Android (`/dashboard?shared_url=...`):
  * l'utente condivide un Reel da Instagram e se lo ritrova già incollato qui.
+ *
+ * La verifica dell'autore non è qui dentro: questo componente segnala *quando*
+ * il link è stabile e riceve *se* l'analisi va impedita. Chi monta la card
+ * decide il resto (`hooks/use-creator-preview.ts`), perché quello stato serve
+ * anche a due componenti fratelli.
  */
-export function AnalyzeInput({ initialUrl }: { initialUrl?: string }) {
+export function AnalyzeInput({
+  initialUrl,
+  onUrlSettled,
+  onUrlChanged,
+  blocked = false,
+}: AnalyzeInputProps) {
   const queryClient = useQueryClient();
   const [url, setUrl] = useState(initialUrl ?? "");
   const [mode, setMode] = useState<AnalysisMode>("BOTH");
@@ -89,7 +115,7 @@ export function AnalyzeInput({ initialUrl }: { initialUrl?: string }) {
 
   function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!url.trim() || mutation.isPending) return;
+    if (!url.trim() || mutation.isPending || blocked) return;
     setFieldError(null);
     mutation.mutate();
   }
@@ -109,6 +135,15 @@ export function AnalyzeInput({ initialUrl }: { initialUrl?: string }) {
             onChange={(e) => {
               setUrl(e.target.value);
               if (fieldError) setFieldError(null);
+              onUrlChanged?.();
+            }}
+            onBlur={(e) => onUrlSettled?.(e.target.value)}
+            onPaste={(e) => {
+              // Al momento dell'evento il campo contiene ancora il valore
+              // vecchio: si legge al giro successivo. `element` è il nodo DOM,
+              // che resta valido oltre la vita dell'evento sintetico.
+              const element = e.currentTarget;
+              window.setTimeout(() => onUrlSettled?.(element.value), 0);
             }}
             placeholder="Incolla un link a Reel, TikTok o Short…"
             disabled={mutation.isPending}
@@ -134,7 +169,7 @@ export function AnalyzeInput({ initialUrl }: { initialUrl?: string }) {
           </SelectContent>
         </Select>
 
-        <Button type="submit" disabled={!url.trim() || mutation.isPending}>
+        <Button type="submit" disabled={!url.trim() || mutation.isPending || blocked}>
           {mutation.isPending ? (
             <Loader2 className="size-4 animate-spin" aria-hidden />
           ) : (

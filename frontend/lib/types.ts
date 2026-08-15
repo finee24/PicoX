@@ -143,6 +143,48 @@ export interface CreatorUpdatePayload {
   is_active?: boolean;
 }
 
+/**
+ * Body di `POST /api/v1/creators/validate`.
+ *
+ * `platform` è facoltativa: da un URL di profilo il backend la deduce, e in
+ * quel caso il valore dedotto *vince* su quello inviato. Serve invece per un
+ * handle nudo, che senza è ambiguo — `@tizio` esiste su tutte e tre le
+ * piattaforme — e produce un 422.
+ */
+export interface CreatorValidationPayload {
+  input: string;
+  platform?: Platform;
+}
+
+/** Anteprima del profilo mostrata prima di aggiungere il creator. */
+export interface CreatorProfilePreview {
+  avatar_url: string | null;
+  display_name: string;
+  username: string;
+  is_verified: boolean;
+  /** Follower su Instagram e TikTok, iscritti su YouTube: stessa metrica. */
+  follower_count: number;
+}
+
+/**
+ * Esito di una verifica.
+ *
+ * `exists` e `is_public` rispondono a due domande diverse e non vanno dedotte
+ * l'una dall'altra: un profilo privato è `exists: true, is_public: false` e ha
+ * un'anteprima da mostrare, mentre un account inesistente è `false, false` e
+ * non ne ha.
+ */
+export interface CreatorValidation {
+  platform: Platform;
+  /** Handle normalizzato: è il valore da passare a `POST /creators`. */
+  normalized_identifier: string;
+  exists: boolean;
+  is_public: boolean;
+  profile: CreatorProfilePreview | null;
+  /** Istante dell'ultima verifica *reale*: su un cache hit è quello, non adesso. */
+  checked_at: string;
+}
+
 export interface AnalyzeVideoPayload {
   video_url: string;
   analysis_mode: AnalysisMode;
@@ -177,6 +219,20 @@ export const PLATFORM_LABELS: Record<Platform, string> = {
   instagram: "Instagram",
   tiktok: "TikTok",
   youtube_shorts: "YouTube Shorts",
+};
+
+/**
+ * Come si chiama chi segue un creator, per piattaforma.
+ *
+ * Il backend restituisce un solo campo (`follower_count`) perché la metrica è
+ * concettualmente la stessa; il nome però no, e chiamare "follower" gli
+ * iscritti a un canale YouTube sarebbe una parola che quella piattaforma non
+ * usa.
+ */
+export const PLATFORM_FOLLOWER_NOUN: Record<Platform, string> = {
+  instagram: "follower",
+  tiktok: "follower",
+  youtube_shorts: "iscritti",
 };
 
 export const PACING_LABELS: Record<Pacing, string> = {

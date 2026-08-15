@@ -103,7 +103,28 @@ services:
       # cominciano a scadere è il primo valore da alzare.
       - key: GEMINI_TIMEOUT_SECONDS
         value: "300"
+      # Tentativi HTTP per chiamata, **incluso il primo**. Assorbe i 429/503 che
+      # Google restituisce durante i picchi di domanda e dichiara temporanei:
+      # senza, uno di quelli fa fallire l'analisi dell'utente (misurato 1 su 6 su
+      # `gemini-flash-latest`). Alzarlo **non è gratis**: il caso peggiore di
+      # un'analisi cresce in proporzione e deve restare sotto
+      # ANALYSIS_LOCK_TTL_SECONDS, altrimenti un lock scaduto a metà analisi
+      # riporta la doppia spesa. Il conto è in `config.py`, ed è verificato da
+      # `tests/test_timeout_gemini.py`.
+      - key: GEMINI_RETRY_ATTEMPTS
+        value: "3"
+      # Durata del lock che impedisce di pagare due volte lo stesso video. Legato
+      # ai due valori qui sopra: se li si cambia, va rifatto il conto.
+      - key: ANALYSIS_LOCK_TTL_SECONDS
+        value: "2400"
       - key: APIFY_API_TOKEN
+        sync: false
+      # Verifica dei canali YouTube (`channels.list`). Non dichiarata con
+      # `sync: false` obbligatorio ma **facoltativa**: se non viene impostata,
+      # la validazione YouTube risponde 503 e le altre due piattaforme
+      # continuano a funzionare. Restringerla alla sola YouTube Data API v3
+      # nella console Google: la quota è di 10.000 unità al giorno per progetto.
+      - key: YOUTUBE_API_KEY
         sync: false
 
       # --- Autenticazione dello scheduler --------------------------------

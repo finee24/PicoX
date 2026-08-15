@@ -1196,9 +1196,12 @@ scheduler interni. L'altro trigger ripetibile costoso è `analyze-video`, già
 protetto da `analysis_locks`, il cui problema aperto è il rate limit (vettore A)
 — che è un problema di volume, non di sovrapposizione.
 
-> ⚠️ **La migration `0005` non è applicata al database.** Va applicata **prima**
-> di portare `CRON_ENABLED` a `true`: senza la tabella, ogni giro fallirebbe
-> nell'acquisizione del lock. Finché il cron resta spento non serve nulla.
+> ✅ **La migration `0005` è applicata** dal **15 agosto 2026**. Era rimasta
+> indietro per mesi — il cron è spento, quindi nulla lo segnalava — ed è stata
+> applicata insieme alla `0010`, quando è emerso che mancava. Verificato dopo:
+> RLS attivo, zero policy, nessun privilegio ad `anon` e `authenticated`.
+> `CRON_ENABLED` può ora essere portato a `true` senza che i giri falliscano
+> nell'acquisizione del lock.
 
 ### ~~⚠️ PRIORITÀ MEDIA — due esecuzioni del cron sovrapposte~~ → superata
 
@@ -1219,6 +1222,210 @@ vincolo `UNIQUE` tradotto in `409`, non un last-writer-wins; `update_creator`
 (`creators.py:112`) scrive solo i campi effettivamente inviati
 (`changed_fields()` con `exclude_none`), quindi nessun campo retrocede per
 omissione; `profiles` non viene mai scritta dal backend.
+
+### ✅ RISOLTO — `503 database_unavailable` sulla card di anteprima del creator
+
+**15 agosto 2026.** La card sotto la barra del link rispondeva
+`503 database_unavailable` su ogni tentativo. Non era un difetto del codice
+della PR #7: la migration `0010` **non era mai stata applicata**, quindi
+`creator_validations` non esisteva. `_leggi_cache` è la **prima** cosa che fa
+`validate_creator` (`creator_validation.py:457`), PostgREST rifiuta la SELECT su
+una tabella assente, `translate_postgrest_error` non riconosce quel codice fra i
+casi di dominio e cade nel ramo generico → `DatabaseError` → 503.
+
+Era uno stallo di procedura, non un bug: il piano era applicare la `0010` *dopo*
+la conferma visiva della card, ma la card non è visibile *prima* della `0010`.
+Quando una migration introduce la tabella che un endpoint legge per prima,
+l'ordine è obbligato.
+
+Applicate entrambe le migration mancanti (`0005` e `0010`) al progetto
+`jaimkiagtolxbkftjapx`. Verificato dopo: tre tabelle presenti, RLS attivo con
+zero policy su tutte e tre, **nessun privilegio** ad `anon` o `authenticated`,
+trigger `validation_events_enforce_quota` abilitato, e
+`validation_limit_for_tier` che restituisce `free → 50`, `pro → 500`,
+`null → 50`.
+
+> Nota sull'ordine: `apply_migration` marca la versione con l'istante di
+> applicazione, quindi nella tabella `supabase_migrations` la `0005` compare
+> **dopo** la `0009`. È cosmetico e rispecchia ciò che è davvero successo.
+
+### ✅ RISOLTO — un `503` transitorio di Gemini faceva fallire l'analisi, senza mai ritentare
+
+**15 agosto 2026.** Emerso provando la prima analisi YouTube reale: `503
+gemini_unavailable`. Il passthrough non c'entrava — **funziona**, ed è la prima
+volta che viene verificato contro l'API vera e non contro `FakeGemini`.
+
+**Cosa succedeva.** `gemini-flash-latest` restituisce a intermittenza:
+
+> This model is currently experiencing high demand. Spikes in demand are usually
+> temporary. Please try again later.
+
+Misurato sullo stesso video con la configurazione esatta di produzione
+(`file_data` YouTube + `video_metadata(fps)` + `response_schema` +
+`media_resolution`): **5 successi su 6** su `gemini-flash-latest`, 3 su 3 su
+`gemini-flash-lite-latest`. Le riuscite in 4–10s con schema valido.
+
+**Il difetto era nostro.** `_generate_with_retry` ha un ciclo di due tentativi,
+ma copre **solo** la risposta fuori schema: su `APIError` solleva subito. E
+`google-genai` non ritenta di suo — senza `retry_options` il suo default è
+`stop_after_attempt(1)`. Quindi un errore che Google stesso dichiara temporaneo
+terminava l'analisi al primo colpo, circa **una volta su sei**. Sul percorso con
+download era peggio: Apify e il trasferimento erano già stati pagati e si
+buttavano via.
+
+**La correzione.** `types.HttpRetryOptions` sul client che già costruiamo —
+meccanismo della libreria, nessun pattern nuovo — con `gemini_retry_attempts`
+(3) da `Settings`. Sta sul client e non attorno alla singola chiamata perché
+così copre anche `files.upload` e `files.get`, che avevano lo stesso problema e
+nessun ciclo attorno.
+
+**Il vincolo che il retry tocca, e che è la parte interessante.** I due retry si
+**moltiplicano**: ogni tentativo sullo schema è una `generate_content` che
+internamente può ritentare 3 volte. Il caso peggiore di un'analisi passa da
+1020s a **2220s**, e `analysis_lock_ttl_seconds` era 1200. Lasciarlo lì avrebbe
+fatto scadere il lock durante analisi ancora vive, rimettendo in circolo la
+doppia spesa che la migration `0003` esiste per chiudere — **in silenzio**.
+Portato quindi a **2400s**. Il costo è che un processo morto tiene occupata
+quella tripla per 40 minuti invece di 20; è un blocco per (utente, video,
+modalità), non globale.
+
+**Prova.** 5 test nuovi in `tests/test_timeout_gemini.py`, verificati per
+falsificazione:
+
+| Difetto reintrodotto | Esito |
+|---|---|
+| `retry_options` rimosso dal client | **3 test rossi** |
+| `analysis_lock_ttl_seconds` riportato a 1200 | **1 test rosso**, con il conto nel messaggio |
+
+L'invariante del lock è ora **codificata**, non solo scritta in prosa nel
+commento: il test calcola il caso peggiore dai `Settings` reali e da
+`_TENTATIVI_SCHEMA`, così chi alzerà un timeout a valle troverà un test rosso
+invece di scoperchiare il lock senza accorgersene. Il `2` del ciclo è diventato
+una costante proprio perché il calcolo non fosse una coincidenza.
+
+> Nota emersa per strada: `gemini-2.5-flash` risponde ora
+> `404 no longer available to new users`. Conferma la scelta di
+> `gemini-flash-latest` già in `render.yaml`.
+
+### ✅ RISOLTO — il lockfile del frontend rotto dalla major di npm sbagliata
+
+**15 agosto 2026.** Il job «Build del frontend» falliva su `npm ci` con
+`Missing: @emnapi/runtime@1.11.3 / @emnapi/core@1.11.3 from lock file`. Rotto
+dalla PR #7 (`e31e39d`): su `main` la CI passava.
+
+**È la seconda volta.** `.nvmrc` fissa Node 22, quindi CI e Vercel usano npm 10;
+la macchina di sviluppo gira su Node 24, quindi npm 11. Le due major registrano
+diversamente le dipendenze opzionali transitive, e `npm install react-icons`
+sotto npm 11 ha tolto dal lock due voci che npm 10 pretende. La prima volta era
+stata chiusa allineando la CI a `.nvmrc`; mancava però il lato di chi **scrive**
+il lockfile, ed è da lì che è rientrata.
+
+**Due strade che sembrano giuste e non lo sono**, verificate entrambe:
+
+* rigenerare con npm 11 non basta — npm 10 rifiuta comunque quel lock, perché
+  npm 11 annida quelle voci sotto `@tailwindcss/oxide-wasm32-wasi` invece di
+  tenerle in cima;
+* ricostruire da zero su Windows è peggio — spoglia il lock di tutte le
+  dipendenze delle altre piattaforme: −2905 righe, zero voci `@emnapi`.
+
+La forma che funziona è partire dal lock di `main` e aggiungerci il solo
+`react-icons` con npm 10: **+13 righe, nessuna rimozione**. Verificato con la
+configurazione esatta della CI — `npm@10 ci --dry-run --os=linux --cpu=x64`,
+exit 0 — e non per somiglianza.
+
+**La causa è stata rimossa, non solo l'effetto.** `frontend/.npmrc` con
+`engine-strict=true`: `engines.node` era dichiarato (`22.x`) ma npm si limitava
+a un avviso. Ora un `npm install` sulla major sbagliata **fallisce subito** con
+`EBADENGINE` e la versione attesa nel messaggio, invece di scrivere in silenzio
+un lockfile che si rompe solo in CI. Verificato che scatti su Node 24 e che non
+tocchi `npm run dev` / `lint` / `build`, che non sono comandi di installazione.
+
+> Conseguenza pratica: **per installare pacchetti nel frontend servono Node 22 e
+> npm 10** (`nvm use` legge `.nvmrc`). Alzare la versione resta legittimo, ma va
+> fatto in tre posti insieme — `.nvmrc`, `engines.node`, e il lockfile
+> rigenerato con la npm corrispondente — o si ricrea la stessa divergenza.
+
+### ⚠️ APERTE — cinque voci non bloccanti dalla revisione di sicurezza della PR #7
+
+Giro di `security-reviewer` sull'intero diff della PR #7
+(`feature-creator-validation-and-scraper`, 48 file), **13 agosto 2026**. Il
+verdetto è stato «nessun blocker di sicurezza»: nessuna credenziale hardcoded,
+nessun IDOR, nessuna fuga cross-tenant di dati utente, nessun SSRF nuovo,
+nessun XSS. Un solo blocker, di correttezza (`fetch_video()` interrogava
+`channels.list`), più due MEDIUM sul prompt: **tutti e tre corretti** in
+`6e3b523`.
+
+Restano queste cinque, aperte **per scelta**. Ognuna riporta il rischio esatto e
+non solo il nome, perché il nome da solo non basta a decidere se valga la pena
+chiuderle — e perché fra sei mesi nessuno si ricorderà cosa volesse dire «N3».
+
+**1. `creator_validations.checked_at` è un oracolo cross-tenant.**
+`_leggi_cache` gira *prima* di `_consuma_quota` (`creator_validation.py:457` e
+`:464`), quindi un cache hit non costa quota; e la risposta porta `checked_at`,
+che per contratto è l'istante dell'ultima verifica **reale**, cioè quella fatta
+da chiunque. Un utente autenticato può perciò enumerare handle a costo zero e
+sapere, per ciascuno, **se e quando** un altro utente di Picox l'ha validato
+nelle ultime 24h. Non scopre *chi*, e non legge alcun dato di quell'utente: il
+contenuto della cache è già pubblico su Instagram. Ciò che trapela è il *fatto
+della richiesta* — su una base utenti piccola, quali creator stanno guardando
+gli altri. Chiuderla costa poco: arrotondare `checked_at` alla finestra del TTL,
+o restituire una freschezza booleana. Se si accetta, va detto nella docstring
+dell'endpoint, perché il commento a `creators.py:124-125` oggi giustifica la
+cache condivisa col fatto che «il profilo non è un dato di nessuno» — vero del
+contenuto, non del fatto che sia stato chiesto.
+
+**2. Il passthrough del cron non riverifica l'host prima di dare l'URL a Gemini.**
+Sul percorso manuale `youtube_url` è garantito su un host YouTube perché ci si
+arriva solo dopo `detect_platform()`, che è un'allowlist di host esatti. Sul
+percorso cron (`content_scraper.py:95-96`, da `cron.py`) l'URL è il campo `url`
+di un item di dataset Apify: normalizzato, ma **mai ricontrollato** contro
+quell'allowlist — la piattaforma viene dalla riga `creators`, non dall'URL. Se
+un actor restituisse un URL su un host diverso, lo passeremmo a Gemini come
+fosse YouTube. Non è un SSRF sulla nostra rete (a scaricare sarebbe Google) e
+oggi non è raggiungibile, perché l'actor è scelto in base alla piattaforma. È
+una guardia mancante in un punto dove il resto del modulo la applica ovunque.
+Fix: aggiungere `and detect_platform(video.video_url) == "youtube_shorts"` alla
+condizione.
+
+**3. Il log di audit delle query non scopate ha perso valore di segnale.**
+`unscoped_service_table` logga a INFO ogni accesso che bypassa il RLS
+(`supabase_service.py:288`). Era progettato per essere **raro** — una riga per
+giro di cron — così da poter notare un bypass scorrendo i log. Ora scatta a
+**ogni** `POST /creators/validate`: una volta in lettura, e sui cache miss una
+seconda in scrittura. Il rischio non è una vulnerabilità, è che la riga smetta
+di funzionare come allarme: annegata nel traffico normale, un accesso non
+scopato davvero anomalo non si distingue più. Fix: la cache a `debug`, oppure un
+campo strutturato (`unscoped=True`) su cui filtrare.
+
+**4. L'handle canonico di YouTube non ripassa dalla validazione dell'handle.**
+`creator_validation.py:416` usa `canale.handle.lower()`, che è il `customUrl`
+restituito da Google e **non** passa da `clean_username` / `_USERNAME_RE`. Il
+frontend lo rimanda tale e quale a `POST /creators`, dove il backend lo rivalida
+e risponderebbe **422**. Conseguenza concreta: se Google restituisse una stringa
+fuori dal charset atteso, la card mostrerebbe un handle strano e il click su
+«Segui» darebbe un errore inspiegabile — un flusso che si rompe a metà, non un
+rifiuto onesto all'inizio. Non è né una fuga né un'iniezione: la chiave di
+cache resta `target.identifier`, che è validato.
+
+**5. `is_private` è fail-open sul campo che decide se un profilo è pubblico.**
+`apify_service.py:296-298` fa `is_private=bool(privato)` con `privato = None`
+quando **nessuna** delle chiavi `private` / `isPrivate` / `privateAccount` è
+presente nel payload dell'actor. Se in una release l'actor rinominasse quel
+campo, ogni profilo privato diventerebbe `is_public: true` **senza che nulla lo
+segnali** — e `is_public` è esattamente ciò per cui questo endpoint esiste.
+L'impatto è mite (un creator privato in watchlist non produce insight, quindi
+non si spende) e la scelta è dichiarata nel commento, ma è l'unico punto della
+PR in cui l'incertezza di un provider si risolve in senso permissivo: l'opposto
+della regola applicata alla durata in `_enforce_duration(verificabile=False)`,
+dove «non lo so» significa «non procedere».
+
+> Una sesta voce, **non in questo elenco perché non è nuova**: sui cache hit e
+> sui 422 di `parse_creator_input` non si consuma quota, e non esiste alcun
+> middleware di rate limiting nell'app. Un utente autenticato può quindi
+> generare traffico illimitato sul database da questo endpoint. È un problema di
+> tutta l'API e non della PR — vedi «il vettore A resta aperto» qui sopra —
+> ma `/creators/validate` è l'endpoint più economico da martellare, quindi
+> quando si affronterà il rate limiting è da lì che conviene partire.
 
 ### TODO minori
 

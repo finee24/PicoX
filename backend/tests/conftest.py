@@ -67,8 +67,10 @@ from app.schemas.analysis import (
     StyleAnalysis,
     VideoAnalysisResponse,
 )
-from app.services.apify_service import ScrapedVideo
+from app.services.apify_service import ScrapedProfile, ScrapedVideo
 from app.services.media_service import DownloadedVideo
+from app.services.prompt_loader import AnalysisContext
+from app.services.youtube_service import YouTubeChannel, YouTubeVideo
 from tests.fake_supabase import FakeStore, make_acreate_client, make_jwt
 
 USER_ID = "11111111-1111-4111-8111-111111111111"
@@ -174,12 +176,39 @@ class FakeGemini:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, str]] = []
+        # Le analisi in passthrough sono contate a parte: "ha analizzato" e "ha
+        # scaricato per analizzare" sono due affermazioni diverse, ed è la
+        # differenza che i test sullo scraper devono poter osservare.
+        self.url_calls: list[tuple[str, str]] = []
+        # Il contesto dell'ultima analisi, su entrambi i percorsi: è ciò che
+        # rende verificabile che caption e hashtag arrivino davvero al prompt
+        # invece di fermarsi allo scraper.
+        self.contexts: list[AnalysisContext | None] = []
         self.error: Exception | None = None
 
     async def analyze_video(
-        self, video_path: str, mime_type: str, mode: AnalysisMode
+        self,
+        video_path: str,
+        mime_type: str,
+        mode: AnalysisMode,
+        *,
+        context: AnalysisContext | None = None,
     ) -> VideoAnalysisResponse:
         self.calls.append((video_path, mime_type, mode))
+        self.contexts.append(context)
+        if self.error is not None:
+            raise self.error
+        return build_analysis(mode)
+
+    async def analyze_video_url(
+        self,
+        video_url: str,
+        mode: AnalysisMode,
+        *,
+        context: AnalysisContext | None = None,
+    ) -> VideoAnalysisResponse:
+        self.url_calls.append((video_url, mode))
+        self.contexts.append(context)
         if self.error is not None:
             raise self.error
         return build_analysis(mode)
@@ -191,6 +220,7 @@ class FakeApify:
     def __init__(self) -> None:
         self.resolve_calls: list[str] = []
         self.fetch_calls: list[tuple[str, str]] = []
+        self.profile_calls: list[tuple[str, str]] = []
         self.resolved: ScrapedVideo | None = ScrapedVideo(
             video_url="https://tiktok.com/@creator/video/123",
             download_url="https://cdn.example.com/video-123.mp4",
@@ -199,6 +229,18 @@ class FakeApify:
         )
         self.videos: list[ScrapedVideo] = []
         self.fetch_error: Exception | None = None
+        # Profilo restituito dalla validazione. `None` significa "account
+        # inesistente", che è un esito legittimo e distinto da `profile_error`
+        # — la distinzione che `fetch_profile` esiste per mantenere.
+        self.profile: ScrapedProfile | None = ScrapedProfile(
+            username="creator",
+            display_name="Creator Ufficiale",
+            avatar_url="https://cdn.example.com/avatar.jpg",
+            follower_count=12345,
+            is_private=False,
+            is_verified=True,
+        )
+        self.profile_error: Exception | None = None
 
     async def resolve_video(
         self, video_url: str, platform: str | None = None
@@ -214,6 +256,67 @@ class FakeApify:
             raise self.fetch_error
         return list(self.videos)
 
+    async def fetch_profile(self, platform: str, username: str) -> ScrapedProfile | None:
+        self.profile_calls.append((platform, username))
+        if self.profile_error is not None:
+            raise self.profile_error
+        return self.profile
+
+
+class FakeYouTube:
+    """Doppio di `YouTubeService`.
+
+    `is_configured` è un attributo e non una proprietà calcolata: i test devono
+    poter simulare l'assenza di `YOUTUBE_API_KEY` senza toccare l'ambiente,
+    perché quella variabile è facoltativa e il suo caso "assente" è un
+    comportamento del prodotto, non un guasto della configurazione di test.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.is_configured = True
+        self.channel: YouTubeChannel | None = YouTubeChannel(
+            channel_id="UCaaaaaaaaaaaaaaaaaaaaaa",
+            handle="creator",
+            title="Creator Ufficiale",
+            avatar_url="https://yt3.example.com/avatar.jpg",
+            subscriber_count=98765,
+        )
+        self.error: Exception | None = None
+
+        # Metadati del singolo video. Il default ha una durata **entro** il
+        # limite, quindi un URL YouTube prende il passthrough: è il percorso
+        # normale, e i test che vogliono il ripiego su Apify azzerano il campo.
+        self.video_calls: list[str] = []
+        self.video: YouTubeVideo | None = YouTubeVideo(
+            video_id="dQw4w9WgXcQ",
+            title="Come studiare la sera",
+            channel_title="Creator Ufficiale",
+            duration_seconds=42.0,
+            view_count=1000,
+            like_count=100,
+            comment_count=10,
+            thumbnail_url="https://i.ytimg.example/thumb.jpg",
+        )
+
+    async def fetch_channel(self, identifier: str) -> YouTubeChannel | None:
+        self.calls.append(identifier)
+        if not self.is_configured:
+            from app.core.exceptions import YouTubeError
+
+            raise YouTubeError()
+        if self.error is not None:
+            raise self.error
+        return self.channel
+
+    async def fetch_video(self, video_id: str) -> YouTubeVideo | None:
+        self.video_calls.append(video_id)
+        # Senza chiave configurata il servizio vero non solleva: restituisce
+        # `None`, perché i metadati sono un di più e il chiamante ha un ripiego.
+        if not self.is_configured:
+            return None
+        return self.video
+
 
 @pytest.fixture
 def gemini() -> FakeGemini:
@@ -223,6 +326,11 @@ def gemini() -> FakeGemini:
 @pytest.fixture
 def apify() -> FakeApify:
     return FakeApify()
+
+
+@pytest.fixture
+def youtube() -> FakeYouTube:
+    return FakeYouTube()
 
 
 @pytest.fixture(autouse=True)
@@ -265,7 +373,7 @@ def downloads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 @pytest.fixture
-def app(gemini: FakeGemini, apify: FakeApify, store: FakeStore):
+def app(gemini: FakeGemini, apify: FakeApify, youtube: FakeYouTube, store: FakeStore):
     """App FastAPI con i soli servizi esterni sostituiti.
 
     Auth, middleware, gestione degli errori e routing restano quelli di
@@ -274,10 +382,12 @@ def app(gemini: FakeGemini, apify: FakeApify, store: FakeStore):
     from app.main import create_app
     from app.services.apify_service import get_apify_service
     from app.services.gemini_service import get_gemini_service
+    from app.services.youtube_service import get_youtube_service
 
     application = create_app()
     application.dependency_overrides[get_gemini_service] = lambda: gemini
     application.dependency_overrides[get_apify_service] = lambda: apify
+    application.dependency_overrides[get_youtube_service] = lambda: youtube
     return application
 
 

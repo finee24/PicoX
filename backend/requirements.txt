@@ -30,3 +30,10 @@ supabase>=2.10,<3.0
 
 # --- HTTP client (download video in streaming) -------------------------------
 httpx>=0.27,<1.0
+
+# --- Prompt ------------------------------------------------------------------
+# `backend/prompts/analysis_prompt.yaml`: il prompt di analisi si edita senza
+# toccare il codice. Era già presente nell'ambiente come dipendenza indiretta,
+# ma nessun pacchetto la dichiara — cioè poteva sparire con un aggiornamento
+# altrui e portarsi via l'analisi.
+PyYAML>=6.0,<7.0

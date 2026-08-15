@@ -54,6 +54,23 @@ export function relativeTime(isoDate: string): string {
   return "adesso";
 }
 
+const COMPACT_FORMATTER = new Intl.NumberFormat("it", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
+/**
+ * Follower/iscritti in forma compatta: 12345 → "12.345" → "12,3 Mln".
+ *
+ * Il backend restituisce `0` sia per "nessun follower" sia per "il profilo li
+ * nasconde", perché non ha modo di distinguerli: qui si mostra un trattino
+ * invece di uno zero, che sarebbe un'affermazione più forte del dato.
+ */
+export function formatFollowers(count: number): string {
+  if (!Number.isFinite(count) || count <= 0) return "—";
+  return COMPACT_FORMATTER.format(count);
+}
+
 /** Secondi → "1:23". */
 export function formatDuration(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return "—";

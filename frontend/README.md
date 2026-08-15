@@ -60,9 +60,12 @@ app/
   dashboard/page.tsx      legge ?shared_url= dallo share target
   creators/page.tsx
 components/
-  dashboard-view.tsx      ricerca, chip, griglia, infinite scroll
+  dashboard-view.tsx      ricerca, chip, griglia, infinite scroll, anteprima autore
   insight-card.tsx        badge, key_points, accordion, keyword cliccabili
   creators-view.tsx       tabella + form + toggle + rimozione
+  creator-preview-card.tsx    autore del link + Segui/Seguito (sopra il feed)
+  creator-profile-preview.tsx esito della verifica nel form di aggiunta
+  creator-avatar.tsx      avatar con ripiego sull'iniziale, condiviso dalle due card
   analyze-input.tsx  search-bar.tsx  mode-chips.tsx
   auth-form.tsx  auth-shell.tsx  app-nav.tsx  picox-mark.tsx
   ui/                     Shadcn
@@ -72,7 +75,9 @@ lib/
   supabase-client.ts      client browser (sessione nei cookie)
   supabase-server.ts      client server (cookies() asincrona)
   env.ts  format.ts  utils.ts
-hooks/use-debounced-value.ts
+hooks/
+  use-debounced-value.ts
+  use-creator-preview.ts  verifica dell'autore del link incollato
 proxy.ts                  guardia di autenticazione
 public/manifest.json      PWA + share target
 ```

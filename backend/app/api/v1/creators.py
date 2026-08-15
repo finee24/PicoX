@@ -26,8 +26,13 @@ from app.schemas.creators import (
     CreatorListResponse,
     CreatorResponse,
     CreatorUpdate,
+    CreatorValidationRequest,
+    CreatorValidationResponse,
 )
+from app.services.apify_service import ApifyService, get_apify_service
+from app.services.creator_validation import validate_creator
 from app.services.supabase_service import db_errors, scoped_client
+from app.services.youtube_service import YouTubeService, get_youtube_service
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +84,54 @@ async def create_creator(
         raise ConflictError("Impossibile creare il creator.")
 
     return CreatorResponse.model_validate(result.data[0])
+
+
+@router.post(
+    "/validate",
+    response_model=CreatorValidationResponse,
+    summary="Verifica che un account esista e sia pubblico",
+    responses={
+        401: {"description": "JWT assente o non valido."},
+        409: {
+            "description": (
+                "Quota giornaliera di verifiche esaurita per il piano "
+                "(`validation_quota_reached`)."
+            )
+        },
+        422: {
+            "description": (
+                "Input non riconosciuto: link di un contenuto invece che di un "
+                "profilo, host non supportato, oppure handle nudo senza `platform`."
+            )
+        },
+        503: {"description": "Apify o la YouTube Data API non disponibili."},
+    },
+)
+async def validate_creator_account(
+    payload: CreatorValidationRequest,
+    user: CurrentUser,
+    settings: Annotated[Settings, Depends(get_settings)],
+    apify: Annotated[ApifyService, Depends(get_apify_service)],
+    youtube: Annotated[YouTubeService, Depends(get_youtube_service)],
+) -> CreatorValidationResponse:
+    """Verifica un account prima che venga aggiunto alla watchlist.
+
+    **200 anche quando l'account non esiste.** La verifica è andata a buon fine
+    e la sua risposta è `exists: false`: un 404 direbbe che la *risorsa
+    interrogata* non c'è — cioè l'endpoint — ed è un'altra affermazione.
+
+    `user_id` viene dal JWT verificato: serve alla quota giornaliera, che è per
+    utente. La cache invece è condivisa, perché il profilo di un creator non è
+    un dato di nessuno (migration `0010`).
+    """
+    return await validate_creator(
+        user_id=user.id,
+        raw_input=payload.input,
+        platform=payload.platform,
+        settings=settings,
+        apify=apify,
+        youtube=youtube,
+    )
 
 
 @router.get(

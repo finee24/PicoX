@@ -1,18 +1,27 @@
 "use client";
 
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Loader2, SearchX, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import { AnalyzeInput } from "@/components/analyze-input";
+import { CreatorPreviewCard } from "@/components/creator-preview-card";
 import { InsightCard } from "@/components/insight-card";
 import { ModeChips, type ModeFilter } from "@/components/mode-chips";
 import { SearchBar } from "@/components/search-bar";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useCreatorPreview } from "@/hooks/use-creator-preview";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
-import { fetchCreators, fetchInsights, toUserMessage } from "@/lib/api";
-import type { Creator } from "@/lib/types";
+import {
+  createCreator,
+  deleteCreator,
+  fetchCreators,
+  fetchInsights,
+  toUserMessage,
+} from "@/lib/api";
+import { PLATFORM_LABELS, type Creator } from "@/lib/types";
 
 const PAGE_SIZE = 12;
 
@@ -75,7 +84,38 @@ function NoResultsState({ onReset }: { onReset: () => void }) {
   );
 }
 
+/**
+ * Avviso che prende il posto della card quando l'autore del link non è
+ * analizzabile. Non è un errore dell'utente: è il motivo per cui il pulsante
+ * "Analizza" è disabilitato, e senza questa riga resterebbe inspiegato.
+ */
+function PreviewWarning({ message }: { message: string }) {
+  return (
+    <div
+      className="border-border/60 flex items-start gap-3 rounded-xl border px-5 py-4 text-sm"
+      role="status"
+      aria-live="polite"
+    >
+      <AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-400" aria-hidden />
+      <p className="text-muted-foreground">{message}</p>
+    </div>
+  );
+}
+
+function PreviewSkeleton() {
+  return (
+    <div className="border-border/60 flex items-center gap-4 rounded-xl border px-5 py-4">
+      <Skeleton className="size-14 shrink-0 rounded-full" />
+      <div className="space-y-2">
+        <Skeleton className="h-4 w-48" />
+        <Skeleton className="h-3 w-24" />
+      </div>
+    </div>
+  );
+}
+
 export function DashboardView({ sharedUrl }: { sharedUrl?: string }) {
+  const queryClient = useQueryClient();
   const [searchInput, setSearchInput] = useState("");
   const [mode, setMode] = useState<ModeFilter>(undefined);
 
@@ -112,6 +152,71 @@ export function DashboardView({ sharedUrl }: { sharedUrl?: string }) {
     () => insightsQuery.data?.pages.flatMap((page) => page.items) ?? [],
     [insightsQuery.data],
   );
+
+  // --- Anteprima dell'autore del link incollato -----------------------------
+
+  const preview = useCreatorPreview();
+  const profilo = preview.validation;
+
+  // Se l'autore è già nella watchlist, il pulsante dice "Seguito" e l'azione si
+  // inverte. Il confronto è sulla coppia `(piattaforma, username)`: è la stessa
+  // che il vincolo `UNIQUE (user_id, username, platform)` usa nel database,
+  // quindi non può esistere più di una riga corrispondente. Entrambi gli handle
+  // sono già normalizzati — il backend li abbassa — ma il confronto resta
+  // case-insensitive perché `creators.username` può contenere righe scritte
+  // prima che la validazione esistesse.
+  const creatoreSeguito = useMemo(() => {
+    if (!profilo) return undefined;
+    return creatorsQuery.data?.items.find(
+      (creator) =>
+        creator.platform === profilo.platform &&
+        creator.username.toLowerCase() === profilo.normalized_identifier.toLowerCase(),
+    );
+  }, [profilo, creatorsQuery.data]);
+
+  // Stesso endpoint della pagina "Creator monitorati": la card è una
+  // scorciatoia verso quella stessa entità, non un flusso parallelo. Ne
+  // consegue che valgono anche gli stessi limiti — il tetto di creator attivi
+  // del piano risponde 409 qui come là, e il messaggio arriva già scritto.
+  const toggleFollow = useMutation({
+    mutationFn: async () => {
+      if (creatoreSeguito) {
+        await deleteCreator(creatoreSeguito.id);
+        return { seguito: false };
+      }
+      if (!profilo) throw new Error("Nessun profilo da seguire.");
+      await createCreator({
+        username: profilo.normalized_identifier,
+        platform: profilo.platform,
+        analysis_mode: "BOTH",
+      });
+      return { seguito: true };
+    },
+    onSuccess: ({ seguito }) => {
+      void queryClient.invalidateQueries({ queryKey: ["creators"] });
+      if (seguito) {
+        toast.success("Creator aggiunto", {
+          description: `@${profilo?.normalized_identifier} è ora monitorato su ${
+            profilo ? PLATFORM_LABELS[profilo.platform] : ""
+          }.`,
+        });
+        return;
+      }
+      // `insights.creator_id` è `ON DELETE SET NULL`: la rimozione cambia
+      // righe che stanno nell'altra cache. Senza questa invalidazione gli
+      // insight già scaricati conserverebbero un `creator_id` che non risolve
+      // più, come già documentato in `creators-view.tsx`.
+      void queryClient.invalidateQueries({ queryKey: ["insights"] });
+      toast.success("Creator rimosso", {
+        description: "Gli insight già generati restano in archivio.",
+      });
+    },
+    onError: (error) => {
+      toast.error("Non riesco ad aggiornare la watchlist", {
+        description: toUserMessage(error),
+      });
+    },
+  });
 
   const total = insightsQuery.data?.pages[0]?.total ?? 0;
   const hasFilters = search.trim().length > 0 || mode !== undefined;
@@ -153,7 +258,36 @@ export function DashboardView({ sharedUrl }: { sharedUrl?: string }) {
           </p>
         </div>
 
-        <AnalyzeInput initialUrl={sharedUrl} />
+        <AnalyzeInput
+          initialUrl={sharedUrl}
+          onUrlSettled={preview.verify}
+          onUrlChanged={preview.reset}
+          blocked={preview.blocked}
+        />
+
+        {/* Fra la barra di analisi e la ricerca: l'anteprima riguarda il link
+            appena incollato, non l'archivio. */}
+        {preview.isPending ? (
+          <PreviewSkeleton />
+        ) : profilo?.profile ? (
+          <CreatorPreviewCard
+            // Un creator diverso è una card diversa: la `key` fa ripartire da
+            // zero lo stato interno, altrimenti una conferma di rimozione
+            // lasciata a metà su un profilo resterebbe armata sul successivo.
+            key={`${profilo.platform}:${profilo.normalized_identifier}`}
+            avatarUrl={profilo.profile.avatar_url}
+            displayName={profilo.profile.display_name}
+            username={profilo.profile.username}
+            isVerified={profilo.profile.is_verified}
+            followerCount={profilo.profile.follower_count}
+            platform={profilo.platform}
+            isFollowing={creatoreSeguito !== undefined}
+            onToggleFollow={() => toggleFollow.mutate()}
+            isLoading={toggleFollow.isPending}
+          />
+        ) : preview.warning ? (
+          <PreviewWarning message={preview.warning} />
+        ) : null}
       </section>
 
       <section className="space-y-3">

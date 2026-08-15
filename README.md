@@ -66,7 +66,7 @@ picox/
 │   │   ├── schemas/             modelli Pydantic (sono anche il response_schema di Gemini)
 │   │   ├── services/            gemini · apify · media · supabase
 │   │   └── cron_config.md       come schedulare il job periodico
-│   ├── prompts/                 prompt Gemini, fuori dal codice applicativo
+│   ├── prompts/                 prompt Gemini editabili: analysis_prompt.yaml + sezioni .md
 │   ├── scripts/check_env.py     verifica delle variabili d'ambiente all'avvio
 │   ├── tests/                   suite pytest, nessuna chiamata di rete
 │   ├── render.yaml              blueprint di deploy
@@ -123,6 +123,7 @@ viene mai committato:
 | `GEMINI_API_KEY` | Analisi multimodale |
 | `GEMINI_MODEL` | Default `gemini-2.5-flash`; consigliato `gemini-flash-latest` |
 | `APIFY_API_TOKEN` | Scraping Instagram / TikTok / YouTube Shorts |
+| `YOUTUBE_API_KEY` | *Facoltativa.* Verifica dei canali YouTube (`channels.list`). Senza, quella sola piattaforma risponde `503` |
 | `CRON_SECRET` | Segreto dell'header `X-CRON-SECRET` |
 | `FRONTEND_URL` | **Unico** origin ammesso dal CORS |
 | `BACKEND_URL` | Base URL dell'API |
@@ -479,6 +480,59 @@ Nessun privilegio ad `anon` e `authenticated`, RLS attivo senza policy — come
 `analysis_locks`, `job_locks` e `subscriptions`. La tabella cresce senza limite e
 andrà potata da un job periodico, per il quale `job_locks` è già generica sul
 nome del job.
+
+#### `validation_events`
+
+Una riga per verifica di un account **pagata**. Introdotta dalla migration
+`0010`. Stessa forma e stesso ruolo di `analysis_events`, su un secondo endpoint
+a consumo (`POST /api/v1/creators/validate`).
+
+| Colonna | Tipo | Note |
+| --- | --- | --- |
+| `id` | `uuid` | PK, `DEFAULT gen_random_uuid()` |
+| `user_id` | `uuid` | FK → `auth.users(id)` `ON DELETE CASCADE` |
+| `platform` | `text` | `CHECK IN ('instagram','tiktok','youtube_shorts')` — dice quale provider è stato pagato |
+| `normalized_identifier` | `text` | `NOT NULL` |
+| `created_at` | `timestamptz` | `NOT NULL DEFAULT now()`; colonna su cui si conta la quota del giorno, in **UTC** |
+
+**I cache hit non compaiono**: non costano nulla, quindi non consumano quota.
+Compaiono invece le verifiche che chiamano il provider e falliscono, perché
+l'actor è comunque partito ed è stato fatturato.
+
+Il trigger `validation_events_enforce_quota` rifiuta l'inserimento oltre
+`validation_limit_for_tier(tier)` verifiche nel giorno corrente, sollevando
+`PX003` → `409 validation_quota_reached`. Terzo codice accanto a `PX001` (tetto
+creator) e `PX002` (quota analisi): tre limiti diversi richiedono all'utente tre
+azioni diverse.
+
+#### `creator_validations`
+
+Cache del risultato di una verifica, con TTL applicativo di 24h
+(`CREATOR_VALIDATION_TTL_HOURS`). Introdotta dalla migration `0010`.
+
+| Colonna | Tipo | Note |
+| --- | --- | --- |
+| `platform` | `text` | PK insieme a `normalized_identifier` |
+| `normalized_identifier` | `text` | Handle minuscolo, senza `@` e senza URL attorno |
+| `response` | `jsonb` | La risposta già composta, nella forma di `CreatorValidationResponse` |
+| `checked_at` | `timestamptz` | Ultima verifica **reale**; è ciò che l'endpoint restituisce anche su un cache hit |
+
+**È l'unica tabella condivisa fra utenti, e non ha una colonna `user_id`.** Il
+contenuto non è un dato di nessuno — nome, avatar, follower e stato
+pubblico/privato di un profilo sono già visibili a chiunque apra quel profilo —
+mentre una cache per utente ripagherebbe il provider una volta per ogni utente
+interessato allo stesso creator, cioè esattamente la spesa che la cache esiste
+per evitare. È quindi la terza tabella in `_UNSCOPED_ALLOWED`, accanto a
+`creators` e `job_locks`.
+
+**La cache non è un rate limit**, ed è il motivo per cui esiste anche
+`validation_events`: azzera il costo delle chiamate ripetute sullo stesso
+identificatore, ma 5.000 handle *diversi* restano 5.000 chiamate pagate.
+
+Nessun privilegio ad `anon` e `authenticated`. Qui la ragione non è la
+riservatezza del contenuto, che è pubblico: è che una riga falsificata farebbe
+risultare pubblico un profilo privato — o esistente un account inventato — per
+**tutti** gli utenti e per 24h.
 
 #### `creators`
 

@@ -54,6 +54,7 @@ from app.core.exceptions import (
     ConflictError,
     DatabaseError,
     PlanLimitError,
+    ValidationQuotaError,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,10 @@ _PLAN_LIMIT: Final = "PX001"
 # di proposito: sono due limiti di piano diversi, e il client deve poterli
 # distinguere per dire la cosa giusta all'utente.
 _ANALYSIS_QUOTA: Final = "PX002"
+# Sollevato da `enforce_validation_quota` (migration 0010). Terzo codice per lo
+# stesso motivo per cui esiste il secondo: «hai troppi creator», «hai esaurito
+# le analisi» e «hai esaurito le verifiche» sono tre istruzioni diverse.
+_VALIDATION_QUOTA: Final = "PX003"
 
 # `profiles` è scopata sulla PK, non su una colonna `user_id`.
 _SCOPE_COLUMN: Final[dict[str, str]] = {
@@ -77,15 +82,25 @@ _SCOPE_COLUMN: Final[dict[str, str]] = {
     "insights": "user_id",
     "analysis_locks": "user_id",
     "analysis_events": "user_id",
+    "validation_events": "user_id",
 }
 
 # Tabelle su cui è ammessa una query service-role non filtrata per utente.
 # `creators` c'è perché il cron deve enumerare i creator attivi di tutti i
 # tenant e non ha un utente corrente da cui derivare il filtro. `job_locks` c'è
 # perché è coordinamento fra processi: non contiene dati di alcun utente e non
-# ha una colonna su cui scopare. `insights` non c'è, e non deve entrarci: lì una
-# query non scopata è una fuga di dati.
-_UNSCOPED_ALLOWED: Final[frozenset[str]] = frozenset({"creators", "job_locks"})
+# ha una colonna su cui scopare. `creator_validations` c'è per la stessa ragione
+# di `job_locks` e non per comodità: è una cache di dati **già pubblici** sul
+# profilo di un creator, la sua chiave è `(platform, identifier)` e un utente
+# non compare da nessuna parte. Renderla per utente moltiplicherebbe la spesa
+# esterna per il numero di utenti interessati allo stesso creator, cioè
+# esattamente ciò che la cache esiste per evitare (migration 0010). Chi ha
+# validato cosa sta invece in `validation_events`, che ha `user_id` ed è scopata
+# come le altre. `insights` non c'è, e non deve entrarci: lì una query non
+# scopata è una fuga di dati.
+_UNSCOPED_ALLOWED: Final[frozenset[str]] = frozenset(
+    {"creators", "job_locks", "creator_validations"}
+)
 
 _service_client: AsyncClient | None = None
 _service_client_lock = asyncio.Lock()
@@ -298,6 +313,10 @@ def translate_postgrest_error(exc: APIError, *, context: str) -> Exception:
     if code == _ANALYSIS_QUOTA:
         logger.info("Quota giornaliera di analisi esaurita (%s): %s", context, exc.message)
         return AnalysisQuotaError()
+
+    if code == _VALIDATION_QUOTA:
+        logger.info("Quota giornaliera di validazioni esaurita (%s): %s", context, exc.message)
+        return ValidationQuotaError()
 
     if code == _PLAN_LIMIT:
         # Senza questo ramo il limite di piano finirebbe nel caso generico qui

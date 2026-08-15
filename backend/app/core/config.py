@@ -46,6 +46,37 @@ class Settings(BaseSettings):
     # Attesa massima perché il file caricato passi in stato ACTIVE.
     gemini_file_active_timeout_seconds: int = 120
 
+    # Tentativi HTTP per chiamata a Gemini, **incluso il primo**. Non è il retry
+    # sullo schema (quello vive in `_generate_with_retry` e ne bastano 2): è la
+    # difesa contro gli errori di trasporto e di capacità, che Google restituisce
+    # come 429/503 dichiarandoli temporanei.
+    #
+    # Serve perché senza `retry_options` il client `google-genai` non ritenta
+    # **nulla** — il suo default è `stop_after_attempt(1)`. Misurato il 15 agosto
+    # 2026 su `gemini-flash-latest`: 1 richiesta su 6 tornava
+    # `503 "experiencing high demand"` in ~4s, e ognuna faceva fallire l'analisi
+    # dell'utente. Sul percorso con download il costo era già stato pagato
+    # (Apify + trasferimento) e si buttava via.
+    #
+    # 3 e non di più per il vincolo del lock: ogni tentativo può durare fino a
+    # `gemini_timeout_seconds`, e il prodotto con i 2 tentativi sullo schema
+    # entra nel caso peggiore che `analysis_lock_ttl_seconds` deve coprire.
+    gemini_retry_attempts: int = Field(default=3, ge=1, le=5)
+
+    # Frame al secondo campionati dal modello. È la leva più diretta sui token:
+    # ogni frame è tokenizzato una volta, quindi il costo scala linearmente col
+    # frame rate. Il default dell'API è 1.0.
+    #
+    # **Non scendere sotto 0.3-0.5 per il contenuto short-form**: Reel, Shorts e
+    # TikTok sono montati con tagli rapidi, e sotto quella soglia l'analisi dello
+    # stile perde i beat visivi che deve misurare — la durata dell'hook, la
+    # lunghezza media dell'inquadratura. Il validatore impone il pavimento.
+    gemini_video_fps: float = Field(default=1.0, ge=0.3, le=24.0)
+    # Frame rate delle analisi che non guardano il montaggio (modalità `INFO`):
+    # lì contano parlato, testo a schermo e argomento, che un campionamento più
+    # rado non perde.
+    gemini_video_fps_ridotto: float = Field(default=0.5, ge=0.3, le=24.0)
+
     # --- Apify ---------------------------------------------------------------
     apify_api_token: SecretStr
     apify_instagram_actor: str = "apify/instagram-scraper"
@@ -54,6 +85,28 @@ class Settings(BaseSettings):
     apify_timeout_seconds: int = 180
     # Quanti video recenti richiedere per creator a ogni giro di cron.
     apify_results_per_creator: int = 10
+    # Actor dedicato al *profilo* Instagram, distinto da quello sui post: quello
+    # sopra scrapa i contenuti di un URL e non espone `isPrivate`, che è
+    # esattamente il campo su cui la validazione decide.
+    apify_instagram_profile_actor: str = "apify/instagram-profile-scraper"
+    # Timeout più stretto di `apify_timeout_seconds`: un profilo è una singola
+    # pagina, non un dataset di video, e questa chiamata sta dentro una
+    # richiesta HTTP interattiva — l'utente sta guardando un input in loading.
+    apify_profile_timeout_seconds: int = Field(default=45, ge=5)
+
+    # --- YouTube Data API v3 --------------------------------------------------
+    # Solo per la validazione dei canali (`channels.list`): lo scraping dei
+    # video resta su Apify. Facoltativa — senza, la validazione YouTube risponde
+    # 503 e le altre due piattaforme continuano a funzionare.
+    youtube_api_key: SecretStr | None = None
+    youtube_api_timeout_seconds: int = Field(default=15, ge=1)
+
+    # --- Validazione dei creator ---------------------------------------------
+    # Quanto resta valida una riga di `creator_validations` prima di essere
+    # rivalidata. È una scelta di freschezza contro costo: un profilo che passa
+    # da pubblico a privato resta visto come pubblico al più per questa durata,
+    # e in cambio non si ripaga il provider a ogni chiamata.
+    creator_validation_ttl_hours: int = Field(default=24, ge=1)
 
     # --- Applicazione --------------------------------------------------------
     frontend_url: str = "http://localhost:3000"
@@ -90,10 +143,27 @@ class Settings(BaseSettings):
     # Durata del lock su (user_id, video_url, analysis_mode). **Deve superare la
     # durata massima di un'analisi legittima**: se scadesse prima, una seconda
     # richiesta lo sottrarrebbe a un'analisi ancora in corso e si tornerebbe a
-    # pagare due volte. Il caso peggiore è la somma dei timeout a valle —
-    # Apify 180 + download 120 + attesa del file Gemini 120 + inferenza 300 per
-    # ciascuno dei 2 tentativi = 1020s — e questo default lascia margine.
-    analysis_lock_ttl_seconds: int = Field(default=1200, ge=60)
+    # pagare due volte. Il caso peggiore è la somma dei timeout a valle:
+    #
+    #   Apify 180 + download 120 + attesa del file Gemini 120
+    #   + inferenza 300 per 3 tentativi HTTP per 2 tentativi sullo schema = 2220s
+    #
+    # I due retry si **moltiplicano**, non si sommano: ogni tentativo sullo
+    # schema è una `generate_content` che al suo interno può ritentare fino a
+    # `gemini_retry_attempts` volte. È il motivo per cui questo numero è salito
+    # da 1200 a 2400 il 15 agosto 2026, insieme all'introduzione del retry HTTP:
+    # lasciarlo a 1200 avrebbe reintrodotto la doppia spesa che la migration
+    # `0003` esiste per chiudere, e in silenzio.
+    #
+    # `tests/test_timeout_gemini.py` verifica l'aritmetica: se qualcuno alza un
+    # timeout a valle o i tentativi, il test fallisce invece di lasciar
+    # scoperchiare il lock in silenzio.
+    #
+    # Il costo di alzarlo è che un processo morto a metà analisi tiene occupata
+    # quella tripla per 40 minuti invece di 20. È un blocco per (utente, video,
+    # modalità), non globale, e la richiesta che lo trova preso risponde 409
+    # dopo `analysis_lock_wait_seconds` invece di restare appesa.
+    analysis_lock_ttl_seconds: int = Field(default=2400, ge=60)
     # Quanto attende una richiesta che trova il lock già preso, prima di
     # arrendersi con 409. È un numero di esperienza utente e non ha alcun
     # obbligo di coincidere col TTL: attendere costa un `await` su un poll, non

@@ -27,9 +27,9 @@ from typing import Any
 import httpx
 import pytest
 
-from app.api.v1.analyze import find_cached_insight, perform_analysis
 from app.api.v1.cron import _filter_already_analyzed
 from app.core.config import get_settings
+from app.services.analysis_service import find_cached_insight, perform_analysis
 from app.services.media_service import canonical_cache_key, normalize_video_url
 from tests.conftest import USER_ID, FakeApify, FakeGemini, FakeYouTube
 from tests.fake_supabase import FakeStore, make_jwt

@@ -25,10 +25,10 @@ from typing import Any
 import httpx
 import pytest
 
-from app.api.v1.analyze import perform_analysis
 from app.core.config import get_settings
 from app.core.exceptions import AnalysisInProgressError, GeminiError
 from app.services import analysis_lock as lock_service
+from app.services.analysis_service import perform_analysis
 from tests.conftest import USER_ID, FakeApify, FakeGemini, FakeYouTube
 from tests.fake_supabase import FakeStore
 

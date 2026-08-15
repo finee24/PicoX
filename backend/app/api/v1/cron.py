@@ -23,7 +23,6 @@ from weakref import WeakKeyDictionary
 
 from fastapi import APIRouter, BackgroundTasks, Depends
 
-from app.api.v1.analyze import perform_analysis
 from app.core.config import Settings, get_settings
 from app.core.exceptions import ApifyError, PicoxError
 from app.core.security import verify_cron_enabled, verify_cron_secret
@@ -31,6 +30,7 @@ from app.middleware.error_handler import SafeRoute
 from app.schemas.analysis import AnalysisMode
 from app.schemas.creators import Platform
 from app.schemas.insights import CronCreatorResult, CronRunResponse
+from app.services.analysis_service import perform_analysis
 from app.services.apify_service import ApifyService, ScrapedVideo, get_apify_service
 from app.services.content_scraper import da_video_scrapato
 from app.services.gemini_service import GeminiService, get_gemini_service

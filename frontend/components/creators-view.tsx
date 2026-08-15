@@ -41,6 +41,7 @@ import {
   validateCreator,
 } from "@/lib/api";
 import {
+  ANALYSIS_MODE_OPTIONS,
   PLATFORM_LABELS,
   type AnalysisMode,
   type Creator,
@@ -51,11 +52,6 @@ import {
 
 const PLATFORMS: Platform[] = ["instagram", "tiktok", "youtube_shorts"];
 
-const MODES: { value: AnalysisMode; label: string }[] = [
-  { value: "BOTH", label: "Completa" },
-  { value: "INFO", label: "Solo contenuto" },
-  { value: "STYLE", label: "Solo stile" },
-];
 
 const CREATORS_KEY = ["creators"] as const;
 
@@ -264,7 +260,7 @@ function AddCreatorForm() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {MODES.map((option) => (
+                  {ANALYSIS_MODE_OPTIONS.map((option) => (
                     <SelectItem key={option.value} value={option.value}>
                       {option.label}
                     </SelectItem>
@@ -380,7 +376,7 @@ function CreatorRow({ creator }: { creator: Creator }) {
     },
   });
 
-  const modeLabel = MODES.find((m) => m.value === creator.analysis_mode)?.label;
+  const modeLabel = ANALYSIS_MODE_OPTIONS.find((m) => m.value === creator.analysis_mode)?.label;
 
   return (
     <TableRow>
@@ -405,7 +401,7 @@ function CreatorRow({ creator }: { creator: Creator }) {
             <SelectValue>{modeLabel}</SelectValue>
           </SelectTrigger>
           <SelectContent>
-            {MODES.map((option) => (
+            {ANALYSIS_MODE_OPTIONS.map((option) => (
               <SelectItem key={option.value} value={option.value}>
                 {option.label}
               </SelectItem>

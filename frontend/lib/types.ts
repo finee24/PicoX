@@ -235,6 +235,25 @@ export const PLATFORM_FOLLOWER_NOUN: Record<Platform, string> = {
   youtube_shorts: "iscritti",
 };
 
+/**
+ * Le modalità di analisi, nell'ordine in cui vanno offerte.
+ *
+ * Una lista e non un `Record` come le altre etichette qui accanto, perché
+ * l'ordine è parte del significato: "Completa" va per prima perché è il default
+ * del backend (`CreatorCreate.analysis_mode`) e la scelta giusta per chi non sa
+ * ancora cosa gli serve.
+ *
+ * Stava scritta due volte — `MODES` in `creators-view`, `MODE_OPTIONS` in
+ * `analyze-input` — con lo stesso contenuto e due nomi. Due copie di un elenco
+ * di opzioni divergono alla prima modalità aggiunta, e il primo sintomo è un
+ * menu che in una pagina mostra una scelta e nell'altra no.
+ */
+export const ANALYSIS_MODE_OPTIONS: { value: AnalysisMode; label: string }[] = [
+  { value: "BOTH", label: "Completa" },
+  { value: "INFO", label: "Solo contenuto" },
+  { value: "STYLE", label: "Solo stile" },
+];
+
 export const PACING_LABELS: Record<Pacing, string> = {
   slow: "Lento",
   moderate: "Moderato",

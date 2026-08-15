@@ -15,13 +15,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ApiError, analyzeVideo, toUserMessage } from "@/lib/api";
-import type { AnalysisMode } from "@/lib/types";
+import { ANALYSIS_MODE_OPTIONS, type AnalysisMode } from "@/lib/types";
 
-const MODE_OPTIONS: { value: AnalysisMode; label: string }[] = [
-  { value: "BOTH", label: "Completa" },
-  { value: "INFO", label: "Solo contenuto" },
-  { value: "STYLE", label: "Solo stile" },
-];
 
 interface AnalyzeInputProps {
   initialUrl?: string;
@@ -161,7 +156,7 @@ export function AnalyzeInput({
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {MODE_OPTIONS.map((option) => (
+            {ANALYSIS_MODE_OPTIONS.map((option) => (
               <SelectItem key={option.value} value={option.value}>
                 {option.label}
               </SelectItem>

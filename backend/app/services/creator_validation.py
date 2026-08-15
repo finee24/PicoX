@@ -46,6 +46,7 @@ from app.schemas.creators import (
     clean_username,
 )
 from app.services.apify_service import ApifyService
+from app.services.provider_parsing import come_datetime
 from app.services.supabase_service import (
     db_errors,
     service_table,
@@ -252,7 +253,7 @@ async def _leggi_cache(
     if not isinstance(riga, dict):
         return None
 
-    verificato = _come_datetime(riga.get("checked_at"))
+    verificato = come_datetime(riga.get("checked_at"))
     if verificato is None:
         return None
 
@@ -313,27 +314,6 @@ async def _scrivi_cache(
             target.identifier,
             exc_info=True,
         )
-
-
-def _come_datetime(value: Any) -> datetime | None:
-    """`checked_at` come datetime consapevole del fuso.
-
-    PostgREST restituisce un ISO-8601 con offset, ma una riga scritta a mano o
-    da un client diverso potrebbe non averlo: un datetime *naive* confrontato
-    con uno *aware* solleva `TypeError`, quindi si assume UTC — che è il fuso
-    in cui il database scrive `now()`.
-    """
-    if isinstance(value, datetime):
-        istante = value
-    elif isinstance(value, str) and value:
-        try:
-            istante = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    else:
-        return None
-
-    return istante if istante.tzinfo is not None else istante.replace(tzinfo=UTC)
 
 
 # =============================================================================

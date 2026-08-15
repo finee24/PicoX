@@ -25,6 +25,7 @@ from apify_client.errors import ApifyApiError, ApifyClientError
 from app.core.config import Settings, get_settings
 from app.core.exceptions import ApifyError
 from app.services.media_service import normalize_video_url
+from app.services.provider_parsing import come_datetime, primo_contatore
 
 logger = logging.getLogger(__name__)
 
@@ -163,24 +164,6 @@ def _first_float(item: dict[str, Any], keys: tuple[str, ...]) -> float | None:
     return None
 
 
-def _first_int(item: dict[str, Any], keys: tuple[str, ...]) -> int | None:
-    for key in keys:
-        value = item.get(key)
-        # `bool` è sottotipo di `int` e passerebbe l'isinstance: un `True` letto
-        # come conteggio 1 sarebbe un dato inventato, non un dato mancante.
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, (int, float)) and value >= 0:
-            return int(value)
-        if isinstance(value, str):
-            # Gli actor restituiscono a volte il conteggio come stringa, e la
-            # YouTube Data API lo fa *sempre* (`subscriberCount: "12300"`).
-            cleaned = value.replace(".", "").replace(",", "").strip()
-            if cleaned.isdigit():
-                return int(cleaned)
-    return None
-
-
 def _first_bool(item: dict[str, Any], keys: tuple[str, ...]) -> bool | None:
     """Primo valore booleano trovato, `None` se nessuna chiave lo riporta.
 
@@ -192,17 +175,6 @@ def _first_bool(item: dict[str, Any], keys: tuple[str, ...]) -> bool | None:
         value = item.get(key)
         if isinstance(value, bool):
             return value
-    return None
-
-
-def _parse_datetime(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str) and value:
-        try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
     return None
 
 
@@ -240,12 +212,12 @@ def _normalize_item(item: dict[str, Any]) -> ScrapedVideo | None:
         duration_seconds=_first_float(item, _DURATION_KEYS) or _first_float(meta, _DURATION_KEYS),
         caption=_first_str(item, _CAPTION_KEYS),
         published_at=next(
-            (dt for key in _PUBLISHED_KEYS if (dt := _parse_datetime(item.get(key)))), None
+            (dt for key in _PUBLISHED_KEYS if (dt := come_datetime(item.get(key)))), None
         ),
         author_username=author_username.lstrip("@") if author_username else None,
-        like_count=_first_int(item, _LIKE_KEYS),
-        view_count=_first_int(item, _VIEW_KEYS),
-        comment_count=_first_int(item, _COMMENT_KEYS),
+        like_count=primo_contatore(item, _LIKE_KEYS),
+        view_count=primo_contatore(item, _VIEW_KEYS),
+        comment_count=primo_contatore(item, _COMMENT_KEYS),
     )
 
 
@@ -274,9 +246,9 @@ def _normalize_profile(item: dict[str, Any], fallback_username: str) -> ScrapedP
     if not username:
         return None
 
-    follower_count = _first_int(author, _FOLLOWERS_KEYS)
+    follower_count = primo_contatore(author, _FOLLOWERS_KEYS)
     if follower_count is None:
-        follower_count = _first_int(item, _FOLLOWERS_KEYS)
+        follower_count = primo_contatore(item, _FOLLOWERS_KEYS)
 
     privato = _first_bool(author, _PRIVATE_KEYS)
     if privato is None:

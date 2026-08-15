@@ -141,7 +141,7 @@ async def find_cached_insight(
 # =============================================================================
 
 
-def _build_insight_payload(
+def _componi_payload_insight(
     analysis: VideoAnalysisResponse,
     *,
     video_url: str,
@@ -503,7 +503,7 @@ async def _esegui_analisi(
         gemini=gemini,
     )
 
-    payload = _build_insight_payload(
+    payload = _componi_payload_insight(
         analysis,
         video_url=video_url,
         cache_key=cache_key,

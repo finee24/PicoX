@@ -27,8 +27,6 @@ from __future__ import annotations
 import logging
 import os
 import socket
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 from app.core.exceptions import ConflictError
@@ -139,16 +137,15 @@ async def release(job_name: str) -> None:
         )
 
 
-@asynccontextmanager
-async def job_lock(job_name: str, ttl_seconds: int) -> AsyncIterator[bool]:
-    """Contesto che espone se il lock è stato ottenuto.
-
-    Il rilascio avviene **solo** se lo si era ottenuto: rilasciare il lock di un
-    altro giro aprirebbe esattamente la finestra che questo modulo chiude.
-    """
-    ottenuto = await acquire(job_name, ttl_seconds)
-    try:
-        yield ottenuto
-    finally:
-        if ottenuto:
-            await release(job_name)
+# NOTA — qui **non** esiste un context manager `job_lock()`, e l'assenza è
+# deliberata: è l'unico punto in cui questo modulo diverge dal gemello
+# `analysis_lock`, che invece ne ha uno (usato da `analyze.py`).
+#
+# Un CM legherebbe il rilascio allo scope della route, mentre il lock del cron
+# deve **sopravvivere alla richiesta**: `check_updates` risponde a fine
+# censimento e passa il lock al `BackgroundTask` (`_esegui_e_rilascia`), che lo
+# rilascia minuti dopo. Da qui l'acquire/release esplicito con `rilascia_qui`.
+#
+# Ne era stato scritto uno per simmetria; è rimasto senza chiamanti e i test non
+# lo toccavano. Rimosso, perché un helper che nessuno può usare senza
+# reintrodurre il difetto che il modulo chiude è peggio di nessun helper.

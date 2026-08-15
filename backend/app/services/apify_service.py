@@ -29,7 +29,6 @@ from app.services.media_service import normalize_video_url
 logger = logging.getLogger(__name__)
 
 _RATE_LIMIT_STATUS: Final = 429
-_APIFY_STORAGE_HOST: Final = "api.apify.com"
 _RETRYABLE_STATUS: Final = frozenset({429, 500, 502, 503, 504})
 
 # Chiavi candidate per ciascun campo, in ordine di preferenza. Gli actor

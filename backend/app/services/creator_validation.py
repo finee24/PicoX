@@ -57,10 +57,17 @@ logger = logging.getLogger(__name__)
 
 _TABELLA_CACHE: Final = "creator_validations"
 
-# Host → piattaforma. Rispecchia `_PLATFORM_HOSTS` di `apify_service` ed è
-# un'allowlist di host **esatti** per la stessa ragione spiegata lì: un
-# confronto per sottostringa classificherebbe `instagram.com.evil.example` come
-# Instagram, e manderebbe la richiesta di un terzo all'actor sbagliato.
+# Host → piattaforma. È un'allowlist di host **esatti** per la stessa ragione
+# spiegata in `apify_service._PLATFORM_HOSTS`: un confronto per sottostringa
+# classificherebbe `instagram.com.evil.example` come Instagram, e manderebbe la
+# richiesta di un terzo all'actor sbagliato.
+#
+# **Non è una copia di quella tabella, e non va allineata a quella.** Qui
+# mancano di proposito `youtu.be`, `vm.tiktok.com` e `vt.tiktok.com`: in quegli
+# URL il primo segmento di path è un id di contenuto, che il parser dei profili
+# tratterebbe come handle — validando un creator che non esiste. Le due tabelle
+# rispondono a domande diverse (quale actor invocare, contro cos'è un profilo
+# valido) e devono poter divergere.
 _HOST_PIATTAFORMA: Final[dict[str, Platform]] = {
     "instagram.com": "instagram",
     "www.instagram.com": "instagram",

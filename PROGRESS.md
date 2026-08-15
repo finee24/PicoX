@@ -1249,6 +1249,64 @@ trigger `validation_events_enforce_quota` abilitato, e
 > applicazione, quindi nella tabella `supabase_migrations` la `0005` compare
 > **dopo** la `0009`. È cosmetico e rispecchia ciò che è davvero successo.
 
+### ✅ RISOLTO — un `503` transitorio di Gemini faceva fallire l'analisi, senza mai ritentare
+
+**15 agosto 2026.** Emerso provando la prima analisi YouTube reale: `503
+gemini_unavailable`. Il passthrough non c'entrava — **funziona**, ed è la prima
+volta che viene verificato contro l'API vera e non contro `FakeGemini`.
+
+**Cosa succedeva.** `gemini-flash-latest` restituisce a intermittenza:
+
+> This model is currently experiencing high demand. Spikes in demand are usually
+> temporary. Please try again later.
+
+Misurato sullo stesso video con la configurazione esatta di produzione
+(`file_data` YouTube + `video_metadata(fps)` + `response_schema` +
+`media_resolution`): **5 successi su 6** su `gemini-flash-latest`, 3 su 3 su
+`gemini-flash-lite-latest`. Le riuscite in 4–10s con schema valido.
+
+**Il difetto era nostro.** `_generate_with_retry` ha un ciclo di due tentativi,
+ma copre **solo** la risposta fuori schema: su `APIError` solleva subito. E
+`google-genai` non ritenta di suo — senza `retry_options` il suo default è
+`stop_after_attempt(1)`. Quindi un errore che Google stesso dichiara temporaneo
+terminava l'analisi al primo colpo, circa **una volta su sei**. Sul percorso con
+download era peggio: Apify e il trasferimento erano già stati pagati e si
+buttavano via.
+
+**La correzione.** `types.HttpRetryOptions` sul client che già costruiamo —
+meccanismo della libreria, nessun pattern nuovo — con `gemini_retry_attempts`
+(3) da `Settings`. Sta sul client e non attorno alla singola chiamata perché
+così copre anche `files.upload` e `files.get`, che avevano lo stesso problema e
+nessun ciclo attorno.
+
+**Il vincolo che il retry tocca, e che è la parte interessante.** I due retry si
+**moltiplicano**: ogni tentativo sullo schema è una `generate_content` che
+internamente può ritentare 3 volte. Il caso peggiore di un'analisi passa da
+1020s a **2220s**, e `analysis_lock_ttl_seconds` era 1200. Lasciarlo lì avrebbe
+fatto scadere il lock durante analisi ancora vive, rimettendo in circolo la
+doppia spesa che la migration `0003` esiste per chiudere — **in silenzio**.
+Portato quindi a **2400s**. Il costo è che un processo morto tiene occupata
+quella tripla per 40 minuti invece di 20; è un blocco per (utente, video,
+modalità), non globale.
+
+**Prova.** 5 test nuovi in `tests/test_timeout_gemini.py`, verificati per
+falsificazione:
+
+| Difetto reintrodotto | Esito |
+|---|---|
+| `retry_options` rimosso dal client | **3 test rossi** |
+| `analysis_lock_ttl_seconds` riportato a 1200 | **1 test rosso**, con il conto nel messaggio |
+
+L'invariante del lock è ora **codificata**, non solo scritta in prosa nel
+commento: il test calcola il caso peggiore dai `Settings` reali e da
+`_TENTATIVI_SCHEMA`, così chi alzerà un timeout a valle troverà un test rosso
+invece di scoperchiare il lock senza accorgersene. Il `2` del ciclo è diventato
+una costante proprio perché il calcolo non fosse una coincidenza.
+
+> Nota emersa per strada: `gemini-2.5-flash` risponde ora
+> `404 no longer available to new users`. Conferma la scelta di
+> `gemini-flash-latest` già in `render.yaml`.
+
 ### ⚠️ APERTE — cinque voci non bloccanti dalla revisione di sicurezza della PR #7
 
 Giro di `security-reviewer` sull'intero diff della PR #7

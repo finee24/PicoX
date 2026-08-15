@@ -14,9 +14,23 @@ Da lì in poi il percorso è lo stesso:
 2. validazione Pydantic della risposta — **prima** che qualcosa raggiunga il
    database.
 
-Sul parsing è previsto **un solo retry**: il modello occasionalmente tronca il
-JSON, e un secondo tentativo lo risolve. Se fallisce anche quello si solleva
+## Due retry, a due altezze diverse
+
+Si sommano male se si confondono, quindi vale distinguerli:
+
+* **sul trasporto** — `HttpRetryOptions` sul client (`gemini_retry_attempts`).
+  Copre 429/503/timeout, cioè gli errori che Google dichiara temporanei. Vale per
+  *ogni* chiamata, `files.upload` e `files.get` comprese;
+* **sul parsing** — il ciclo in `_generate_with_retry`, **un solo retry**: il
+  modello occasionalmente tronca il JSON e un secondo tentativo lo risolve.
+
+Il secondo non copre il primo: su `APIError` quel ciclo solleva subito, per
+scelta — ritentare l'inferenza intera quando è la rete a non funzionare
+significherebbe pagare due volte il video. Quando falliscono entrambi si solleva
 `GeminiError` (503) e sul database non viene scritto nulla.
+
+I due si **moltiplicano** nel caso peggiore, ed è il numero che
+`analysis_lock_ttl_seconds` deve coprire: vedi il commento in `config.py`.
 
 Il testo del prompt non sta qui: lo compone `prompt_loader.build_analysis_prompt`
 a partire da `prompts/analysis_prompt.yaml`. Questo modulo decide *come* guardare
@@ -63,6 +77,14 @@ from app.services.prompt_loader import AnalysisContext, build_analysis_prompt
 logger = logging.getLogger(__name__)
 
 _FILE_POLL_INTERVAL_SECONDS: Final = 2.0
+
+# Tentativi sulla *risposta fuori schema*, non sul trasporto (quello è
+# `gemini_retry_attempts`, sul client). Costante e non impostazione perché non è
+# una leva da girare in produzione: se il modello sbaglia lo schema due volte non
+# è il campionamento a essere sbagliato. Vive qui perché il caso peggiore del
+# lock si calcola moltiplicando i due, e un `2` letterale dentro il ciclo
+# renderebbe quel calcolo — e il test che lo verifica — una coincidenza.
+_TENTATIVI_SCHEMA: Final = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,7 +154,26 @@ class GeminiService:
             # configurazione è in secondi: la conversione è il motivo per cui
             # questa riga non è un semplice passaggio di parametro.
             http_options=types.HttpOptions(
-                timeout=self._settings.gemini_timeout_seconds * 1000
+                timeout=self._settings.gemini_timeout_seconds * 1000,
+                # Senza questo il client **non ritenta nulla**: il default di
+                # `google-genai` è `stop_after_attempt(1)`. Un `503` di capacità
+                # — che Google dichiara temporaneo nel messaggio stesso —
+                # terminava l'analisi al primo colpo, e il ciclo qui sotto in
+                # `_generate_with_retry` non lo copre: quello ritenta la
+                # *risposta fuori schema*, e su `APIError` solleva subito.
+                #
+                # Sta sul client e non attorno alla singola chiamata perché così
+                # protegge anche `files.upload` e `files.get`, che hanno lo
+                # stesso identico problema e nessun ciclo attorno.
+                retry_options=types.HttpRetryOptions(
+                    attempts=self._settings.gemini_retry_attempts,
+                    initial_delay=1.0,
+                    # Tetto basso di proposito: il caso che si vuole assorbire è
+                    # un picco di domanda che rientra in secondi, non un guasto
+                    # prolungato. Attese lunghe qui verrebbero pagate dal lock,
+                    # non dal servizio remoto.
+                    max_delay=8.0,
+                ),
             ),
         )
 
@@ -268,7 +309,7 @@ class GeminiService:
 
         # Un solo retry: se il modello ha sbagliato due volte, il problema non è
         # il campionamento e ritentare all'infinito costa soltanto token.
-        for attempt in (1, 2):
+        for attempt in range(1, _TENTATIVI_SCHEMA + 1):
             try:
                 response = await self._client.aio.models.generate_content(
                     model=self._settings.gemini_model,

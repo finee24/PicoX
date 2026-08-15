@@ -61,6 +61,15 @@ payload = analysis.model_dump(mode="json")
 - `ValidationError` → **un solo retry** della chiamata a Gemini (il modello a volte
   tronca il JSON). Se anche il retry fallisce → `503`, e sul database non si scrive
   nulla.
+- Quel retry **non copre gli errori di trasporto**, e non deve: sono due livelli
+  distinti. `google-genai` non ritenta di suo (`stop_after_attempt(1)`), quindi il
+  client va costruito con `HttpRetryOptions` o un `503` di capacità — che Google
+  dichiara temporaneo nel messaggio stesso — fa fallire l'analisi al primo colpo.
+  I due si **moltiplicano** nel caso peggiore: `tentativi_http × tentativi_schema`
+  volte il timeout per chiamata. Quel prodotto deve restare sotto la durata del
+  lock che protegge dalla doppia spesa, altrimenti il lock scade mentre l'analisi
+  è ancora viva e la spesa doppia torna in silenzio. Alzare i tentativi senza
+  rifare quel conto è il modo tipico di rompere la garanzia.
 - Serializzare con `model_dump(mode="json")`: `datetime`/`UUID`/`Enum` devono
   diventare tipi JSON nativi prima di finire in `jsonb`. **Senza**
   `exclude_none=True`: la forma del `jsonb` deve restare identica fra un record e
@@ -173,6 +182,8 @@ istruzioni. Tre proprietà li tengono a bada:
 - [ ] Nessun `dict[str, Any]` / `Any` nei modelli di risposta.
 - [ ] `.model_validate()` / `.model_validate_json()` chiamato prima di ogni scrittura.
 - [ ] Retry singolo sul parsing, poi `503`.
+- [ ] Retry sul trasporto configurato sul client (429/503/timeout), e il prodotto
+      dei due tentativi ancora dentro il TTL del lock.
 - [ ] Limiti di dimensione/durata letti da `Settings` e applicati prima dell'upload.
 - [ ] Sul passthrough: durata verificata dai metadati, altrimenti niente passthrough.
 - [ ] `finally` che cancella file locale **e** file remoto (percorso con upload).

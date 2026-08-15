@@ -33,16 +33,25 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
 
 from app.core.config import Settings
-from app.core.exceptions import ConflictError
 from app.schemas.analysis import AnalysisMode
-from app.services.supabase_service import db_errors, service_table
+from app.services.expiring_lock import acquisisci, rilascia
+from app.services.supabase_service import service_table
 
 logger = logging.getLogger(__name__)
 
 _TABLE = "analysis_locks"
+
+
+def _chiave(cache_key: str, mode: AnalysisMode) -> dict[str, str]:
+    """Le colonne che identificano il lock di un'analisi."""
+    return {"cache_key": cache_key, "analysis_mode": mode}
+
+
+def _descrizione(cache_key: str, mode: AnalysisMode) -> str:
+    """Come il lock compare nei log."""
+    return f"analisi di {cache_key} (modalità {mode})"
 
 
 async def acquire(
@@ -62,78 +71,22 @@ async def acquire(
     Il secondo passo è ciò che rende il meccanismo immune ai lock orfani: non
     esiste stato che un crash possa lasciare bloccato per sempre.
     """
-    adesso = datetime.now(UTC)
-    scadenza = adesso + timedelta(seconds=settings.analysis_lock_ttl_seconds)
-
-    locks = await service_table(_TABLE, user_id)
-
-    try:
-        async with db_errors("acquisizione lock analisi"):
-            await locks.insert(
-                {
-                    "cache_key": cache_key,
-                    "analysis_mode": mode,
-                    "locked_at": adesso.isoformat(),
-                    "expires_at": scadenza.isoformat(),
-                }
-            ).execute()
-        return True
-    except ConflictError:
-        # Un lock per questa chiave esiste già. Resta da capire se è vivo o
-        # abbandonato, e la risposta deve arrivare dal database in un'unica
-        # operazione: leggerlo e poi decidere lascerebbe spazio a due
-        # richieste che lo sottraggono entrambe.
-        pass
-
-    async with db_errors("sottrazione lock analisi scaduto"):
-        risultato = await (
-            locks.update(
-                {
-                    "locked_at": adesso.isoformat(),
-                    "expires_at": scadenza.isoformat(),
-                }
-            )
-            .eq("cache_key", cache_key)
-            .eq("analysis_mode", mode)
-            .lte("expires_at", adesso.isoformat())
-            .execute()
-        )
-
-    sottratto = bool(risultato.data)
-    if sottratto:
-        logger.warning(
-            "Lock analisi scaduto e sottratto per %s (modalità %s): "
-            "il detentore precedente non lo ha rilasciato.",
-            cache_key,
-            mode,
-        )
-    return sottratto
+    return await acquisisci(
+        await service_table(_TABLE, user_id),
+        _chiave(cache_key, mode),
+        settings.analysis_lock_ttl_seconds,
+        descrizione=_descrizione(cache_key, mode),
+        contesto="analisi",
+    )
 
 
 async def release(user_id: str, cache_key: str, mode: AnalysisMode) -> None:
-    """Rilascia il lock. Non solleva mai.
-
-    È un'ottimizzazione del caso normale, non la garanzia: libera subito la
-    chiave invece di far attendere la scadenza. Se fallisce — o se non viene
-    mai eseguito, come in un crash — il lock scade comunque da sé, quindi qui
-    un errore non merita di trasformare un'analisi riuscita in un 500.
-    """
-    try:
-        locks = await service_table(_TABLE, user_id)
-        await (
-            locks.delete()
-            .eq("cache_key", cache_key)
-            .eq("analysis_mode", mode)
-            .execute()
-        )
-    except Exception:  # noqa: BLE001 — vedi docstring: qui nulla deve propagarsi
-        logger.warning(
-            "Rilascio del lock analisi fallito per %s (modalità %s): "
-            "scadrà da sé entro il TTL.",
-            cache_key,
-            mode,
-            exc_info=False,
-        )
+    """Rilascia il lock. Non solleva mai — vedi `expiring_lock.rilascia`."""
+    await rilascia(
+        lambda: service_table(_TABLE, user_id),
+        _chiave(cache_key, mode),
+        descrizione=_descrizione(cache_key, mode),
+    )
 
 
 @asynccontextmanager

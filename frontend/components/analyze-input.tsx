@@ -15,6 +15,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ApiError, analyzeVideo, toUserMessage } from "@/lib/api";
+import { insightKeys } from "@/lib/query-keys";
 import { ANALYSIS_MODE_OPTIONS, type AnalysisMode } from "@/lib/types";
 
 
@@ -75,7 +76,7 @@ export function AnalyzeInput({
       // Il record è nuovo (o già esistente): in entrambi i casi la griglia va
       // rigenerata, perché un cache hit potrebbe comunque non essere nella
       // pagina attualmente caricata.
-      void queryClient.invalidateQueries({ queryKey: ["insights"] });
+      void queryClient.invalidateQueries({ queryKey: insightKeys.all });
 
       // 200 e 201 sono esiti diversi: senza distinguerli, su un video già
       // analizzato l'utente vedrebbe "completata" senza che accada nulla.

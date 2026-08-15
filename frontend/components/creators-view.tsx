@@ -40,6 +40,7 @@ import {
   updateCreator,
   validateCreator,
 } from "@/lib/api";
+import { creatorKeys, insightKeys } from "@/lib/query-keys";
 import {
   ANALYSIS_MODE_OPTIONS,
   PLATFORM_LABELS,
@@ -53,7 +54,6 @@ import {
 const PLATFORMS: Platform[] = ["instagram", "tiktok", "youtube_shorts"];
 
 
-const CREATORS_KEY = ["creators"] as const;
 
 function AddCreatorForm() {
   const queryClient = useQueryClient();
@@ -146,7 +146,7 @@ function AddCreatorForm() {
       setValidation(null);
       setValidationFailure(null);
       richiestaCorrente.current = "";
-      void queryClient.invalidateQueries({ queryKey: CREATORS_KEY });
+      void queryClient.invalidateQueries({ queryKey: creatorKeys.all });
       toast.success("Creator aggiunto", {
         description: `@${creator.username} è ora monitorato su ${PLATFORM_LABELS[creator.platform]}.`,
       });
@@ -322,10 +322,10 @@ function CreatorRow({ creator }: { creator: Creator }) {
     // Aggiornamento ottimistico: uno switch che aspetta il round-trip prima di
     // muoversi sembra rotto.
     onMutate: async (isActive) => {
-      await queryClient.cancelQueries({ queryKey: CREATORS_KEY });
-      const previous = queryClient.getQueryData<CreatorListResponse>(CREATORS_KEY);
+      await queryClient.cancelQueries({ queryKey: creatorKeys.all });
+      const previous = queryClient.getQueryData<CreatorListResponse>(creatorKeys.all);
 
-      queryClient.setQueryData<CreatorListResponse>(CREATORS_KEY, (old) =>
+      queryClient.setQueryData<CreatorListResponse>(creatorKeys.all, (old) =>
         old
           ? {
               ...old,
@@ -340,21 +340,21 @@ function CreatorRow({ creator }: { creator: Creator }) {
     },
     onError: (error, _isActive, context) => {
       if (context?.previous) {
-        queryClient.setQueryData(CREATORS_KEY, context.previous);
+        queryClient.setQueryData(creatorKeys.all, context.previous);
       }
       toast.error("Non riesco ad aggiornare il creator", {
         description: toUserMessage(error),
       });
     },
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: CREATORS_KEY });
+      void queryClient.invalidateQueries({ queryKey: creatorKeys.all });
     },
   });
 
   const remove = useMutation({
     mutationFn: () => deleteCreator(creator.id),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: CREATORS_KEY });
+      void queryClient.invalidateQueries({ queryKey: creatorKeys.all });
       // Anche gli insight: `insights.creator_id` è `ON DELETE SET NULL`, quindi
       // la cancellazione di un creator cambia righe che stanno nell'altra
       // cache. Senza questa riga gli insight già scaricati conservavano il
@@ -363,7 +363,7 @@ function CreatorRow({ creator }: { creator: Creator }) {
       // La chiave è il prefisso `["insights"]`: le query reali sono
       // `["insights", { search, mode }]`, e invalidare il prefisso le copre
       // tutte, come già fa `analyze-input.tsx`.
-      void queryClient.invalidateQueries({ queryKey: ["insights"] });
+      void queryClient.invalidateQueries({ queryKey: insightKeys.all });
       toast.success("Creator rimosso", {
         description: "Gli insight già generati restano in archivio.",
       });
@@ -388,7 +388,7 @@ function CreatorRow({ creator }: { creator: Creator }) {
   const changeMode = useMutation({
     mutationFn: (mode: AnalysisMode) => updateCreator(creator.id, { analysis_mode: mode }),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: CREATORS_KEY });
+      void queryClient.invalidateQueries({ queryKey: creatorKeys.all });
     },
     onError: (error) => {
       toast.error("Non riesco ad aggiornare la modalità", {
@@ -470,7 +470,7 @@ function CreatorRow({ creator }: { creator: Creator }) {
 
 export function CreatorsView() {
   const creatorsQuery = useQuery({
-    queryKey: CREATORS_KEY,
+    queryKey: creatorKeys.all,
     queryFn: ({ signal }) => fetchCreators(signal),
   });
 

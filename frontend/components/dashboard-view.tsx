@@ -21,6 +21,7 @@ import {
   fetchInsights,
   toUserMessage,
 } from "@/lib/api";
+import { creatorKeys, insightKeys } from "@/lib/query-keys";
 import { PLATFORM_LABELS, type Creator } from "@/lib/types";
 
 const PAGE_SIZE = 12;
@@ -125,7 +126,7 @@ export function DashboardView({ sharedUrl }: { sharedUrl?: string }) {
   const insightsQuery = useInfiniteQuery({
     // I filtri fanno parte della chiave: cambiandoli si ottiene una lista nuova
     // invece di accodare risultati eterogenei a quelli già caricati.
-    queryKey: ["insights", { search, mode }],
+    queryKey: insightKeys.list({ search, mode }),
     initialPageParam: 1,
     queryFn: ({ pageParam, signal }) =>
       fetchInsights({ search, mode, page: pageParam, limit: PAGE_SIZE }, signal),
@@ -135,7 +136,7 @@ export function DashboardView({ sharedUrl }: { sharedUrl?: string }) {
   // I creator servono solo a risolvere `creator_id` → username: `/insights` non
   // restituisce l'handle. Cambiano di rado, quindi la cache è lunga.
   const creatorsQuery = useQuery({
-    queryKey: ["creators"],
+    queryKey: creatorKeys.all,
     queryFn: ({ signal }) => fetchCreators(signal),
     staleTime: 5 * 60_000,
   });
@@ -193,7 +194,7 @@ export function DashboardView({ sharedUrl }: { sharedUrl?: string }) {
       return { seguito: true };
     },
     onSuccess: ({ seguito }) => {
-      void queryClient.invalidateQueries({ queryKey: ["creators"] });
+      void queryClient.invalidateQueries({ queryKey: creatorKeys.all });
       if (seguito) {
         toast.success("Creator aggiunto", {
           description: `@${profilo?.normalized_identifier} è ora monitorato su ${
@@ -206,7 +207,7 @@ export function DashboardView({ sharedUrl }: { sharedUrl?: string }) {
       // righe che stanno nell'altra cache. Senza questa invalidazione gli
       // insight già scaricati conserverebbero un `creator_id` che non risolve
       // più, come già documentato in `creators-view.tsx`.
-      void queryClient.invalidateQueries({ queryKey: ["insights"] });
+      void queryClient.invalidateQueries({ queryKey: insightKeys.all });
       toast.success("Creator rimosso", {
         description: "Gli insight già generati restano in archivio.",
       });

@@ -376,6 +376,27 @@ function CreatorRow({ creator }: { creator: Creator }) {
     },
   });
 
+  // Stessa API di `toggle` qui sopra, e ora anche stesso meccanismo. Era
+  // scritta come catena `.then().catch()`: l'unica mutazione del frontend a non
+  // passare da `useMutation`, e quindi l'unica a **non** attraversare la
+  // `MutationCache` di `app/providers.tsx`, dove un 401 innesca il logout
+  // centralizzato. Su questa singola azione una sessione scaduta mostrava un
+  // toast e lasciava l'utente in una pagina che non poteva più funzionare.
+  //
+  // Niente aggiornamento ottimistico, a differenza di `toggle`: qui non ce
+  // n'era, e aggiungerlo avrebbe cambiato ciò che si vede.
+  const changeMode = useMutation({
+    mutationFn: (mode: AnalysisMode) => updateCreator(creator.id, { analysis_mode: mode }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: CREATORS_KEY });
+    },
+    onError: (error) => {
+      toast.error("Non riesco ad aggiornare la modalità", {
+        description: toUserMessage(error),
+      });
+    },
+  });
+
   const modeLabel = ANALYSIS_MODE_OPTIONS.find((m) => m.value === creator.analysis_mode)?.label;
 
   return (
@@ -387,15 +408,7 @@ function CreatorRow({ creator }: { creator: Creator }) {
       <TableCell>
         <Select
           value={creator.analysis_mode}
-          onValueChange={(next) =>
-            updateCreator(creator.id, { analysis_mode: next as AnalysisMode })
-              .then(() => queryClient.invalidateQueries({ queryKey: CREATORS_KEY }))
-              .catch((error: unknown) =>
-                toast.error("Non riesco ad aggiornare la modalità", {
-                  description: toUserMessage(error),
-                }),
-              )
-          }
+          onValueChange={(next) => changeMode.mutate(next as AnalysisMode)}
         >
           <SelectTrigger size="sm" className="w-36" aria-label={`Modalità per @${creator.username}`}>
             <SelectValue>{modeLabel}</SelectValue>

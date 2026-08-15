@@ -128,15 +128,26 @@ interface RequestOptions {
 }
 
 /**
- * Esegue una chiamata autenticata al backend.
+ * Il corpo **e** lo status di una chiamata autenticata al backend.
  *
  * Ogni richiesta porta `Authorization: Bearer <jwt>`: il backend ricava lo
  * `user_id` dal token verificato e non accetta identità dal body.
+ *
+ * Esiste separata da `apiFetch` per un solo chiamante — `analyzeVideo`, che
+ * deve distinguere 201 da 200 — e non è esportata proprio per questo: lo status
+ * serve a chi ne fa qualcosa, e altrove sarebbe un dettaglio del trasporto che
+ * si propaga senza motivo.
+ *
+ * Prima di questa separazione `analyzeVideo` non usava affatto l'helper e
+ * riscriveva a mano cinque cose: il recupero del token, gli header, il `catch`
+ * con `NetworkError` (con la stessa stringa di messaggio ricopiata), il ramo 401
+ * e la chiamata a `parseError`. Cinque copie che dovevano restare allineate a
+ * mano.
  */
-export async function apiFetch<T>(
+async function apiFetchWithStatus<T>(
   path: string,
   { method = "GET", body, signal }: RequestOptions = {},
-): Promise<T> {
+): Promise<{ data: T; status: number }> {
   const token = await getAccessToken();
   if (!token) throw expiredSessionError();
 
@@ -169,10 +180,15 @@ export async function apiFetch<T>(
   }
 
   if (response.status === 204) {
-    return undefined as T;
+    return { data: undefined as T, status: response.status };
   }
 
-  return (await response.json()) as T;
+  return { data: (await response.json()) as T, status: response.status };
+}
+
+/** Il caso normale: solo il corpo, perché lo status non aggiunge nulla. */
+export async function apiFetch<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  return (await apiFetchWithStatus<T>(path, options)).data;
 }
 
 // =============================================================================
@@ -189,37 +205,17 @@ export interface AnalyzeResult {
  * `POST /api/v1/analyze-video`.
  *
  * Il backend distingue **201** (analisi eseguita) da **200** (già presente in
- * cache). `apiFetch` non espone lo status, quindi qui la fetch è esplicita:
- * la differenza serve alla UI per non far credere all'utente che sia stata
- * fatta un'analisi quando in realtà il record esisteva già.
+ * cache), e la differenza serve alla UI per non far credere all'utente che sia
+ * stata fatta un'analisi quando il record esisteva già. È l'unico endpoint del
+ * frontend a cui lo status serva davvero.
  */
 export async function analyzeVideo(payload: AnalyzeVideoPayload): Promise<AnalyzeResult> {
-  const token = await getAccessToken();
-  if (!token) throw expiredSessionError();
+  const { data, status } = await apiFetchWithStatus<Insight>("/api/v1/analyze-video", {
+    method: "POST",
+    body: payload,
+  });
 
-  let response: Response;
-  try {
-    response = await fetch(`${BACKEND_URL}/api/v1/analyze-video`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-  } catch {
-    throw new NetworkError(
-      "Impossibile raggiungere il server. Verifica la connessione e che il backend sia attivo.",
-    );
-  }
-
-  if (response.status === 401) throw expiredSessionError();
-  if (!response.ok) {
-    throw await parseError(response);
-  }
-
-  const insight = (await response.json()) as Insight;
-  return { insight, fromCache: response.status === 200 };
+  return { insight: data, fromCache: status === 200 };
 }
 
 /** `GET /api/v1/insights` con filtri e paginazione. */

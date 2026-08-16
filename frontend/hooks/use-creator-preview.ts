@@ -33,6 +33,25 @@ import { PLATFORM_LABELS, type CreatorValidation } from "@/lib/types";
  * ad Apify. Sarebbe però una chiamata a pagamento a ogni incolla, per un dato
  * che la pipeline di analisi recupera comunque poco dopo — cioè lo stesso
  * costo pagato due volte per anticipare una card.
+ *
+ * ## Perché `AddCreatorForm` non usa questo hook
+ *
+ * `components/creators-view.tsx` verifica lo stesso endpoint con lo stesso
+ * guardiano anti-sorpasso, e a colpo d'occhio sembra la stessa cosa scritta due
+ * volte. Non lo è: le due divergono su **cosa fanno dell'esito**, e la
+ * differenza è di prodotto.
+ *
+ * Qui un profilo privato **blocca**, perché il video non sarebbe scaricabile e
+ * l'analisi fallirebbe dopo aver pagato. Là non blocca: aggiungere un profilo
+ * privato alla watchlist è legittimo — potrebbe tornare pubblico, e nel
+ * frattempo non costa nulla. Qui un `422` viene ingoiato; là diventa un errore
+ * accanto al campo.
+ *
+ * Fonderle richiederebbe di scegliere una delle due semantiche, cioè di
+ * cambiare il comportamento di una delle due pagine. La sola parte davvero
+ * comune è il guardiano "vince l'ultima richiesta", una decina di righe: se un
+ * domani ci fosse un terzo consumatore, è quello da estrarre — non la macchina
+ * a stati.
  */
 export interface CreatorPreviewState {
   /** Presente solo per un autore che **esiste ed è pubblico**: la card mostra quello. */

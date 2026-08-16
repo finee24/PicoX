@@ -313,7 +313,7 @@ def test_video_troppo_grande_restituisce_422(
     dell'errore, perché la cache lo restituirebbe per sempre al posto di una
     nuova analisi.
     """
-    import app.api.v1.analyze as analyze_module
+    import app.services.analysis_service as analysis_module
 
     # Funzione sincrona: `async with download_to_temp(...)` valuta prima la
     # chiamata, quindi l'eccezione parte esattamente dove partirebbe quella vera
@@ -321,7 +321,7 @@ def test_video_troppo_grande_restituisce_422(
     def oversized(url: str, settings: Any, *, known_duration_seconds: float | None = None):
         raise VideoTooLargeError("Il video pesa 512 MB e supera il limite di 200 MB.")
 
-    monkeypatch.setattr(analyze_module, "download_to_temp", oversized)
+    monkeypatch.setattr(analysis_module, "download_to_temp", oversized)
 
     response = client.post(
         "/api/v1/analyze-video",

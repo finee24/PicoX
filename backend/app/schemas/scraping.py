@@ -1,7 +1,7 @@
 """Il risultato di uno scraping, uguale per tutte le piattaforme.
 
 È il tipo che disaccoppia *come si ottiene un video* da *come lo si analizza*.
-A valle esiste una sola funzione — `run_analysis` in `api/v1/analyze.py` — e si
+A valle esiste una sola funzione — `run_analysis` in `services/analysis_service.py` — e si
 rammifica su **un solo bivio**:
 
 * `youtube_url` valorizzato → l'URL va passato a Gemini così com'è, che lo

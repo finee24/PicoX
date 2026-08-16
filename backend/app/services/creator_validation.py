@@ -46,6 +46,7 @@ from app.schemas.creators import (
     clean_username,
 )
 from app.services.apify_service import ApifyService
+from app.services.provider_parsing import come_datetime
 from app.services.supabase_service import (
     db_errors,
     service_table,
@@ -57,10 +58,17 @@ logger = logging.getLogger(__name__)
 
 _TABELLA_CACHE: Final = "creator_validations"
 
-# Host → piattaforma. Rispecchia `_PLATFORM_HOSTS` di `apify_service` ed è
-# un'allowlist di host **esatti** per la stessa ragione spiegata lì: un
-# confronto per sottostringa classificherebbe `instagram.com.evil.example` come
-# Instagram, e manderebbe la richiesta di un terzo all'actor sbagliato.
+# Host → piattaforma. È un'allowlist di host **esatti** per la stessa ragione
+# spiegata in `apify_service._PLATFORM_HOSTS`: un confronto per sottostringa
+# classificherebbe `instagram.com.evil.example` come Instagram, e manderebbe la
+# richiesta di un terzo all'actor sbagliato.
+#
+# **Non è una copia di quella tabella, e non va allineata a quella.** Qui
+# mancano di proposito `youtu.be`, `vm.tiktok.com` e `vt.tiktok.com`: in quegli
+# URL il primo segmento di path è un id di contenuto, che il parser dei profili
+# tratterebbe come handle — validando un creator che non esiste. Le due tabelle
+# rispondono a domande diverse (quale actor invocare, contro cos'è un profilo
+# valido) e devono poter divergere.
 _HOST_PIATTAFORMA: Final[dict[str, Platform]] = {
     "instagram.com": "instagram",
     "www.instagram.com": "instagram",
@@ -245,7 +253,7 @@ async def _leggi_cache(
     if not isinstance(riga, dict):
         return None
 
-    verificato = _come_datetime(riga.get("checked_at"))
+    verificato = come_datetime(riga.get("checked_at"))
     if verificato is None:
         return None
 
@@ -306,27 +314,6 @@ async def _scrivi_cache(
             target.identifier,
             exc_info=True,
         )
-
-
-def _come_datetime(value: Any) -> datetime | None:
-    """`checked_at` come datetime consapevole del fuso.
-
-    PostgREST restituisce un ISO-8601 con offset, ma una riga scritta a mano o
-    da un client diverso potrebbe non averlo: un datetime *naive* confrontato
-    con uno *aware* solleva `TypeError`, quindi si assume UTC — che è il fuso
-    in cui il database scrive `now()`.
-    """
-    if isinstance(value, datetime):
-        istante = value
-    elif isinstance(value, str) and value:
-        try:
-            istante = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    else:
-        return None
-
-    return istante if istante.tzinfo is not None else istante.replace(tzinfo=UTC)
 
 
 # =============================================================================

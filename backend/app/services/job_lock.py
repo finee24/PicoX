@@ -27,12 +27,9 @@ from __future__ import annotations
 import logging
 import os
 import socket
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
 
-from app.core.exceptions import ConflictError
-from app.services.supabase_service import db_errors, unscoped_service_table
+from app.services.expiring_lock import acquisisci, rilascia
+from app.services.supabase_service import unscoped_service_table
 
 logger = logging.getLogger(__name__)
 
@@ -74,81 +71,33 @@ async def acquire(job_name: str, ttl_seconds: int) -> bool:
     esiste stato che un crash possa lasciare bloccato per sempre. Leggere e poi
     decidere, invece, lascerebbe spazio a due giri che lo sottraggono entrambi.
     """
-    adesso = datetime.now(UTC)
-    scadenza = adesso + timedelta(seconds=ttl_seconds)
-    locks = await _table()
-
-    try:
-        async with db_errors("acquisizione lock job"):
-            await locks.insert(
-                {
-                    "job_name": job_name,
-                    "locked_at": adesso.isoformat(),
-                    "expires_at": scadenza.isoformat(),
-                    "holder": _holder(),
-                }
-            ).execute()
-        return True
-    except ConflictError:
-        # Un lock per questo job esiste già: resta da capire se è vivo o
-        # abbandonato, e la risposta deve arrivare dal database in un'unica
-        # operazione condizionale.
-        pass
-
-    async with db_errors("sottrazione lock job scaduto"):
-        risultato = await (
-            locks.update(
-                {
-                    "locked_at": adesso.isoformat(),
-                    "expires_at": scadenza.isoformat(),
-                    "holder": _holder(),
-                }
-            )
-            .eq("job_name", job_name)
-            .lte("expires_at", adesso.isoformat())
-            .execute()
-        )
-
-    sottratto = bool(risultato.data)
-    if sottratto:
-        logger.warning(
-            "Lock del job '%s' scaduto e sottratto: il detentore precedente non "
-            "lo ha rilasciato — processo terminato a metà giro, o giro più lungo "
-            "del TTL configurato.",
-            job_name,
-        )
-    return sottratto
+    return await acquisisci(
+        await _table(),
+        {"job_name": job_name},
+        ttl_seconds,
+        descrizione=f"del job '{job_name}'",
+        contesto="job",
+        # Diagnostico e solo diagnostico: non partecipa ad alcuna decisione,
+        # perché fidarsi di un valore scritto dal detentore precedente
+        # reintrodurrebbe il problema che la scadenza risolve.
+        extra={"holder": _holder()},
+    )
 
 
 async def release(job_name: str) -> None:
-    """Rilascia il lock. Non solleva mai.
-
-    È un'ottimizzazione del caso normale: libera subito la chiave invece di far
-    attendere la scadenza. Se fallisce — o se non viene mai eseguito, come in un
-    crash — il lock scade comunque da sé, quindi qui un errore non merita di
-    trasformare un giro riuscito in un 500.
-    """
-    try:
-        locks = await _table()
-        await locks.delete().eq("job_name", job_name).execute()
-    except Exception:  # noqa: BLE001 — vedi docstring: qui nulla deve propagarsi
-        logger.warning(
-            "Rilascio del lock del job '%s' fallito: scadrà da sé entro il TTL.",
-            job_name,
-            exc_info=False,
-        )
+    """Rilascia il lock. Non solleva mai — vedi `expiring_lock.rilascia`."""
+    await rilascia(_table, {"job_name": job_name}, descrizione=f"del job '{job_name}'")
 
 
-@asynccontextmanager
-async def job_lock(job_name: str, ttl_seconds: int) -> AsyncIterator[bool]:
-    """Contesto che espone se il lock è stato ottenuto.
-
-    Il rilascio avviene **solo** se lo si era ottenuto: rilasciare il lock di un
-    altro giro aprirebbe esattamente la finestra che questo modulo chiude.
-    """
-    ottenuto = await acquire(job_name, ttl_seconds)
-    try:
-        yield ottenuto
-    finally:
-        if ottenuto:
-            await release(job_name)
+# NOTA — qui **non** esiste un context manager `job_lock()`, e l'assenza è
+# deliberata: è l'unico punto in cui questo modulo diverge dal gemello
+# `analysis_lock`, che invece ne ha uno (usato da `analyze.py`).
+#
+# Un CM legherebbe il rilascio allo scope della route, mentre il lock del cron
+# deve **sopravvivere alla richiesta**: `check_updates` risponde a fine
+# censimento e passa il lock al `BackgroundTask` (`_esegui_e_rilascia`), che lo
+# rilascia minuti dopo. Da qui l'acquire/release esplicito con `rilascia_qui`.
+#
+# Ne era stato scritto uno per simmetria; è rimasto senza chiamanti e i test non
+# lo toccavano. Rimosso, perché un helper che nessuno può usare senza
+# reintrodurre il difetto che il modulo chiude è peggio di nessun helper.

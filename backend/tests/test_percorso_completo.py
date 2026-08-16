@@ -26,6 +26,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from tests.conftest import (
+    OTHER_USER_ID,
     TEST_CRON_SECRET,
     USER_ID,
     FakeApify,
@@ -328,3 +329,69 @@ def test_la_seconda_verifica_dello_stesso_account_non_ripaga_il_provider(
     assert len(apify.profile_calls) == 1, "il provider e' stato pagato due volte"
     assert len(store.rows("creator_validations")) == 1
     assert len(store.rows("validation_events")) == 1, "un hit di cache non consuma quota"
+
+
+# =============================================================================
+# 5. Il cron non deve vedere gli insight di un altro tenant
+# =============================================================================
+
+
+def test_il_cron_analizza_per_me_un_video_che_un_altro_utente_ha_gia_analizzato(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    other_auth_headers: dict[str, str],
+    apify: FakeApify,
+    store: FakeStore,
+) -> None:
+    """Il caso che mancava, ed e' il percorso reale e non il builder isolato.
+
+    Il cron **non ha un JWT** e ricade sul client service-role, dove il RLS non
+    esiste: l'unica cosa che separa i tenant e' il filtro che `ScopedTable`
+    applica da se'. Due punti del giro lo attraversano —
+    `_filter_already_analyzed`, che chiede quali video sono gia' stati
+    analizzati, e `find_cached_insight`, che rilegge la riga — ed entrambi
+    leggono `insights`.
+
+    Senza quel filtro il video risulterebbe gia' analizzato **perche' lo ha
+    analizzato qualcun altro**, il cron lo salterebbe, e l'utente non
+    riceverebbe mai il proprio insight. Nessun errore, nessun log: solo un feed
+    che non si popola.
+
+    Gli altri test del cron usano un solo tenant, e senza righe altrui un filtro
+    mancante non ha nulla da rivelare: e' il motivo per cui la suite restava
+    verde con la protezione spenta.
+    """
+    from app.services.apify_service import ScrapedVideo
+
+    # Un altro utente ha gia' analizzato questo video, per conto suo.
+    assert (
+        client.post(
+            "/api/v1/analyze-video",
+            headers=other_auth_headers,
+            json={"video_url": INSTAGRAM_URL, "analysis_mode": "INFO"},
+        ).status_code
+        == 201
+    )
+    assert {riga["user_id"] for riga in store.rows("insights")} == {
+        OTHER_USER_ID
+    }, "presupposto del test non valido"
+
+    # Io seguo un creator il cui feed contiene lo stesso video.
+    corpo = _valida(client, auth_headers, "instagram.com/creator").json()
+    _segui(client, auth_headers, corpo["normalized_identifier"], "instagram", "INFO")
+    apify.videos = [
+        ScrapedVideo(
+            video_url=INSTAGRAM_URL,
+            download_url="https://cdn.example.com/reel.mp4",
+            duration_seconds=25.0,
+        )
+    ]
+
+    assert client.post("/api/v1/cron/check-updates", headers=CRON_HEADERS).status_code == 200
+
+    miei = [riga for riga in store.rows("insights") if riga["user_id"] == USER_ID]
+    assert len(miei) == 1, (
+        "il cron ha saltato il video perche' lo ha visto analizzato da un altro "
+        "utente: il filtro sul proprietario non e' stato applicato"
+    )
+    assert len(store.rows("insights")) == 2, "le due righe devono restare distinte"

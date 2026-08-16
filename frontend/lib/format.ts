@@ -71,6 +71,48 @@ export function formatFollowers(count: number): string {
   return COMPACT_FORMATTER.format(count);
 }
 
+/**
+ * Una misura in secondi con la sua unità: `3.2` → `"3.2s"`.
+ *
+ * **Solleva su un valore non numerico, e lo fa apposta.** È la differenza con
+ * `formatFollowers` e `formatDuration` qui accanto, che davanti a un input
+ * illeggibile restituiscono `"—"`: là il trattino è un'*affermazione vera* — il
+ * backend manda `0` sia per "nessun follower" sia per "il profilo li nasconde",
+ * e mostrare zero sarebbe più forte del dato. Qui no. Qui un campo assente non
+ * significa niente sul video: significa che **il record non ha la forma che
+ * crediamo**, e un trattino lo maschererebbe da misura mancante.
+ *
+ * I campi di `style_data` arrivano da una colonna `jsonb` che contiene lo schema
+ * **in vigore al momento dell'analisi**. Un record scritto prima che un campo
+ * esistesse non ce l'ha, e quel giorno serve accorgersene: un dato mancante deve
+ * essere visibile come anomalia, non nascosto dietro un default.
+ *
+ * Il messaggio nomina il campo e il tipo ricevuto, perché l'alternativa —
+ * lasciar fallire `.toFixed()` — dà `Cannot read properties of undefined`, che
+ * dice cosa è successo ma non dove.
+ *
+ * **Il raggio d'azione è l'intera rotta.** Non esiste alcun error boundary nel
+ * frontend, quindi questa eccezione non abbatte la singola card ma la pagina che
+ * la contiene. È noto e accettato: la scelta è fra un guasto rumoroso e un
+ * archivio che mostra numeri in cui non si può avere fiducia. Chi volesse
+ * restringerlo aggiunga `app/dashboard/error.tsx`, non un fallback qui.
+ *
+ * Il separatore decimale resta il punto, a differenza di `formatFollowers` che
+ * usa quello italiano (`Intl.NumberFormat("it")` → `"12,3 Mln"`). L'incoerenza è
+ * precedente e va decisa a parte: correggerla qui cambierebbe ciò che l'utente
+ * legge.
+ */
+export function formatSeconds(seconds: unknown, decimali = 0, campo = "valore"): string {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) {
+    throw new TypeError(
+      `style_data.${campo}: atteso un numero non negativo, ricevuto ${
+        seconds === null ? "null" : typeof seconds
+      }. Il record è stato scritto con uno schema precedente.`,
+    );
+  }
+  return `${seconds.toFixed(decimali)}s`;
+}
+
 /** Secondi → "1:23". */
 export function formatDuration(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return "—";

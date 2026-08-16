@@ -23,7 +23,6 @@ from weakref import WeakKeyDictionary
 
 from fastapi import APIRouter, BackgroundTasks, Depends
 
-from app.api.v1.analyze import perform_analysis
 from app.core.config import Settings, get_settings
 from app.core.exceptions import ApifyError, PicoxError
 from app.core.security import verify_cron_enabled, verify_cron_secret
@@ -31,6 +30,7 @@ from app.middleware.error_handler import SafeRoute
 from app.schemas.analysis import AnalysisMode
 from app.schemas.creators import Platform
 from app.schemas.insights import CronCreatorResult, CronRunResponse
+from app.services.analysis_service import perform_analysis
 from app.services.apify_service import ApifyService, ScrapedVideo, get_apify_service
 from app.services.content_scraper import da_video_scrapato
 from app.services.gemini_service import GeminiService, get_gemini_service
@@ -58,7 +58,7 @@ router = APIRouter(
 
 # Semaforo **di processo**, non per esecuzione.
 #
-# Prima stava dentro `_run_queued_analyses`, quindi ogni esecuzione ne
+# Prima stava dentro `_esegui_analisi_in_coda`, quindi ogni esecuzione ne
 # costruiva uno proprio e `CRON_MAX_CONCURRENT_ANALYSES` limitava la singola
 # richiesta invece del processo: due giri sovrapposti raddoppiavano il
 # parallelismo (misurato: picco 4 con limite configurato 2). Qui il limite vale
@@ -106,12 +106,12 @@ class _AnalysisJob:
     mode: AnalysisMode
     platform: Platform
     # Resta la forma dello scraper Apify e non `ScraperResult`: la conversione
-    # avviene in `_run_job`, che ha le `Settings` necessarie a decidere se un
+    # avviene in `_esegui_giro`, che ha le `Settings` necessarie a decidere se un
     # video YouTube può andare in passthrough.
     scraped: ScrapedVideo
 
 
-async def _load_active_creators() -> list[dict[str, Any]]:
+async def _creator_attivi() -> list[dict[str, Any]]:
     """Tutti i creator attivi, di tutti gli utenti.
 
     È l'**unica** query service-role senza filtro su `user_id` dell'applicazione:
@@ -167,7 +167,7 @@ async def _filter_already_analyzed(user_id: str, video_urls: list[str]) -> list[
     return [url for chiave, url in per_chiave.items() if chiave not in presenti]
 
 
-async def _run_job(
+async def _esegui_giro(
     job: _AnalysisJob,
     settings: Settings,
     gemini: GeminiService,
@@ -215,7 +215,7 @@ async def _run_job(
         logger.exception("Cron: analisi fallita in modo imprevisto per %s", job.video_url)
 
 
-async def _run_queued_analyses(
+async def _esegui_analisi_in_coda(
     jobs: list[_AnalysisJob],
     settings: Settings,
     gemini: GeminiService,
@@ -230,7 +230,7 @@ async def _run_queued_analyses(
     """
     async def _guarded(job: _AnalysisJob) -> None:
         async with _semaforo_analisi(settings.cron_max_concurrent_analyses):
-            await _run_job(job, settings, gemini, apify, youtube)
+            await _esegui_giro(job, settings, gemini, apify, youtube)
 
     logger.info("Cron: avvio di %s analisi in background.", len(jobs))
     await asyncio.gather(*(_guarded(job) for job in jobs))
@@ -257,7 +257,7 @@ async def _esegui_e_rilascia(
     scadenza del TTL per un errore gia' gestito altrove.
     """
     try:
-        await _run_queued_analyses(jobs, settings, gemini, apify, youtube)
+        await _esegui_analisi_in_coda(jobs, settings, gemini, apify, youtube)
     finally:
         await release(CRON_CHECK_UPDATES)
 
@@ -284,14 +284,16 @@ async def _censisci_creator(
     platform: Platform = creator["platform"]
     mode: AnalysisMode = creator.get("analysis_mode") or "BOTH"
 
-    def fallito(errore: str, videos_found: int = 0) -> tuple[CronCreatorResult, list[_AnalysisJob]]:
+    def fallito(
+        errore: str, video_trovati: int = 0
+    ) -> tuple[CronCreatorResult, list[_AnalysisJob]]:
         return (
             CronCreatorResult(
                 creator_id=creator["id"],
                 username=username,
                 platform=platform,
                 status="failed",
-                videos_found=videos_found,
+                videos_found=video_trovati,
                 error=errore,
             ),
             [],
@@ -299,7 +301,7 @@ async def _censisci_creator(
 
     async with semaforo:
         try:
-            videos = await apify.fetch_latest_videos(platform, username)
+            video = await apify.fetch_latest_videos(platform, username)
         except ApifyError as exc:
             # Fallimento isolato: si registra e gli altri creator proseguono.
             logger.warning(
@@ -310,25 +312,25 @@ async def _censisci_creator(
             logger.exception("Cron: errore imprevisto su %s/%s", platform, username)
             return fallito("Errore imprevisto durante lo scraping.")
 
-        by_url = {video.video_url: video for video in videos}
+        per_url = {v.video_url: v for v in video}
         try:
-            new_urls = await _filter_already_analyzed(user_id, list(by_url))
+            url_nuovi = await _filter_already_analyzed(user_id, list(per_url))
         except PicoxError as exc:
             logger.warning(
                 "Cron: dedup fallito per il creator %s — %s", creator_id, exc.code
             )
-            return fallito("Verifica dei duplicati non riuscita.", len(videos))
+            return fallito("Verifica dei duplicati non riuscita.", len(video))
 
-    jobs = [
+    lavori = [
         _AnalysisJob(
             user_id=user_id,
             creator_id=creator_id,
             video_url=url,
             mode=mode,
             platform=platform,
-            scraped=by_url[url],
+            scraped=per_url[url],
         )
-        for url in new_urls
+        for url in url_nuovi
     ]
     return (
         CronCreatorResult(
@@ -336,11 +338,11 @@ async def _censisci_creator(
             username=username,
             platform=platform,
             status="ok",
-            videos_found=len(videos),
-            new_videos=len(new_urls),
-            queued=len(new_urls),
+            videos_found=len(video),
+            new_videos=len(url_nuovi),
+            queued=len(url_nuovi),
         ),
-        jobs,
+        lavori,
     )
 
 
@@ -397,7 +399,7 @@ async def check_updates(
     # il censimento — va rilasciato qui.
     rilascia_qui = True
     try:
-        creators = await _load_active_creators()
+        creators = await _creator_attivi()
         logger.info("Cron: %s creator attivi da controllare.", len(creators))
 
         semaforo = asyncio.Semaphore(settings.cron_census_concurrency)

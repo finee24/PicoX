@@ -144,11 +144,22 @@ export function InsightCard({
                       label="Tipo di hook"
                       value={HOOK_TYPE_LABELS[style.hook_type] ?? style.hook_type}
                     />
-                    <Field label="Durata hook" value={formatSeconds(style.hook_duration_seconds)} />
+                    <Field
+                      label="Durata hook"
+                      value={formatSeconds(
+                        style.hook_duration_seconds,
+                        0,
+                        "hook_duration_seconds",
+                      )}
+                    />
                     <Field label="Ritmo" value={PACING_LABELS[style.pacing] ?? style.pacing} />
                     <Field
                       label="Inquadratura media"
-                      value={formatSeconds(style.average_shot_duration_seconds, 1)}
+                      value={formatSeconds(
+                        style.average_shot_duration_seconds,
+                        1,
+                        "average_shot_duration_seconds",
+                      )}
                     />
                   </div>
                   <Field label="Tono" value={style.tone_of_voice} />

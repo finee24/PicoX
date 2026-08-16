@@ -18,6 +18,7 @@ YouTube non passa da lì.
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from typing import Any
 
@@ -56,21 +57,31 @@ def contatore(raw: Any) -> int | None:
     `likeCount`, e su un profilo che nasconde i follower l'actor fa lo stesso.
     Zero sarebbe un'affermazione che non abbiamo.
 
-    Tre insidie, tutte incontrate davvero:
+    **Non solleva mai**, ed è la parte che conta: davanti a un valore
+    illeggibile restituisce `None`. Un provider non è tenuto a rispettare le
+    nostre aspettative, e un parser che esplode su un campo accessorio farebbe
+    fallire un'analisi già pagata per un numero che finisce in una card.
+
+    Le insidie, tutte incontrate davvero:
 
     * `bool` è sottotipo di `int` e passerebbe l'`isinstance`: un `True` letto
       come conteggio 1 sarebbe un dato inventato, non un dato mancante;
     * i conteggi arrivano spesso **come stringhe** — la Data API lo fa *sempre*
       (`subscriberCount: "12300"`);
-    * alcuni actor li formattano con i separatori delle migliaia.
+    * alcuni actor li formattano con i separatori delle migliaia;
+    * `json.loads` della stdlib **accetta `Infinity` e `NaN`**, che JSON non
+      prevede, e `int(inf)` solleva `OverflowError`. Da qui `isfinite`;
+    * `str.isdigit()` è vero anche per gli esponenti unicode (`"²"`), dove
+      `int()` solleva `ValueError`. `isdecimal()` è l'insieme che `int()`
+      accetta davvero.
     """
     if isinstance(raw, bool):
         return None
-    if isinstance(raw, (int, float)) and raw >= 0:
-        return int(raw)
+    if isinstance(raw, (int, float)) and not math.isinf(raw) and not math.isnan(raw):
+        return int(raw) if raw >= 0 else None
     if isinstance(raw, str):
         pulito = raw.replace(".", "").replace(",", "").strip()
-        if pulito.isdigit():
+        if pulito.isdecimal():
             return int(pulito)
     return None
 

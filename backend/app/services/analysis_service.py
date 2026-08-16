@@ -42,7 +42,7 @@ from app.services.content_scraper import scrape_content
 from app.services.gemini_service import GeminiService
 from app.services.media_service import canonical_cache_key, download_to_temp
 from app.services.prompt_loader import AnalysisContext
-from app.services.supabase_service import db_errors, scoped_client, service_table
+from app.services.supabase_service import db_errors, scoped_table, service_table
 from app.services.youtube_service import YouTubeService
 
 logger = logging.getLogger(__name__)
@@ -107,19 +107,14 @@ async def find_cached_insight(
     """
     async with db_errors("cache lookup insights"):
         if access_token is not None:
-            async with scoped_client(access_token, settings) as db:
+            async with scoped_table("insights", user_id, access_token, settings) as insights:
                 result = await (
-                    db.table("insights")
-                    .select("*")
-                    .eq("user_id", user_id)
-                    .eq("cache_key", cache_key)
-                    .limit(1)
-                    .execute()
+                    insights.select("*").eq("cache_key", cache_key).limit(1).execute()
                 )
         else:
-            insights = await service_table("insights", user_id)
+            servizio = await service_table("insights", user_id)
             result = await (
-                insights.select("*").eq("cache_key", cache_key).limit(1).execute()
+                servizio.select("*").eq("cache_key", cache_key).limit(1).execute()
             )
 
     if not result.data:

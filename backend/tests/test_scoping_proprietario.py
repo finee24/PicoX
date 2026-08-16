@@ -8,10 +8,38 @@ non era verificata da nessuna parte: rimuovendo il `.eq(...)` da
 Il buco non era teorico. Col client service-role il RLS è scavalcato per
 costruzione, quindi una `select` senza filtro restituisce le righe di *tutti* i
 tenant — ed è esattamente la fuga che la classe esiste per rendere impossibile.
-Nessun test la esercitava perché tutti i percorsi che leggono per conto di un
-utente passano dal client scoped, dove il RLS del doppio maschera l'errore.
 
-Qui si interroga il builder **direttamente**, col client che non ha rete sotto.
+## Quattro percorsi vivi dipendono da questo filtro, oggi
+
+Il **job cron** non ha un JWT di sessione e ricade sempre sul client
+service-role, dove il RLS non esiste. Verificato riga per riga:
+
+* `cron._filter_already_analyzed` → `select("cache_key")`. Legge le chiavi di
+  altri tenant: un video analizzato da B risulterebbe già fatto per A, e il cron
+  lo **salterebbe**. A non riceve mai quell'insight, in silenzio.
+* `analysis_service.find_cached_insight`, ramo `else` → `select("*")`.
+  Restituisce la **riga completa di un altro utente** — summary, style, script —
+  come cache hit di questo.
+* `analysis_service._assicura_attribuzione` → `update`. Filtra solo su `id` e
+  `creator_id is null`: il proprietario lo mette **solo** `ScopedTable.update`.
+* `analysis_service`, scrittura finale → `upsert`. Qui regge la guardia su
+  `on_conflict`, che pretende `user_id` nel target.
+
+Il percorso **manuale** invece usa il client scoped, dove il RLS è la rete di
+sicurezza. È la ragione per cui è facile credere che il filtro sia ridondante:
+lo è per metà dell'applicazione, e non lo è affatto per l'altra metà.
+
+## Perché nessun test lo prendeva
+
+Non perché quei percorsi non fossero esercitati — lo sono, da
+`test_concorrenza_cron.py` e `test_chiave_unificata.py`. Perché **quei test
+popolano lo store con un solo tenant**: senza righe altrui, un filtro mancante
+non ha nulla da rivelare, e la suite resta verde mentre la protezione è spenta.
+
+Da qui due livelli, entrambi necessari. Qui sotto si interroga il builder
+**direttamente**, col client che non ha rete sotto — è il test unitario della
+regola. In `test_percorso_completo.py` c'è invece il caso end-to-end sul cron con
+**due tenant**, che è quello che avrebbe preso il difetto sul percorso reale.
 """
 
 from __future__ import annotations

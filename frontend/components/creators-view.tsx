@@ -69,6 +69,26 @@ function AddCreatorForm() {
   // superate dai fatti: due blur ravvicinati possono tornare in ordine inverso,
   // e senza questo controllo la card mostrerebbe il profilo di ciò che c'era
   // scritto prima.
+  //
+  // Lo stesso guardiano esiste in `hooks/use-creator-preview.ts`, che verifica
+  // lo stesso endpoint. **La somiglianza è superficiale e la separazione è
+  // deliberata**: i due divergono su cosa fanno dell'esito, ed è una differenza
+  // di prodotto, non di implementazione.
+  //
+  //   * qui l'esito grezzo va alla card, che sa mostrare da sé "privato" e "non
+  //     trovato"; là diventa una stringa d'avviso e la card sparisce;
+  //   * qui blocca **solo** l'account inesistente — un profilo privato si può
+  //     comunque aggiungere alla watchlist, magari tornerà pubblico; là blocca
+  //     anche il privato, perché un video di un profilo privato non è
+  //     scaricabile e l'analisi fallirebbe *dopo* aver pagato;
+  //   * qui un 422 diventa un errore di campo; là viene ingoiato, perché su un
+  //     link di un Reel l'autore non è ricavabile e non saperlo non è un motivo
+  //     per impedire un'analisi che funziona.
+  //
+  // Unificarli richiederebbe di scegliere una di queste semantiche, cioè di
+  // cambiare il comportamento di una delle due pagine. Se un domani servisse
+  // davvero, la cosa da estrarre è il solo guardiano "vince l'ultima richiesta",
+  // non la macchina a stati.
   const richiestaCorrente = useRef("");
 
   const verificaAccount = useMutation({

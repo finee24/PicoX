@@ -41,11 +41,17 @@ import { PLATFORM_LABELS, type CreatorValidation } from "@/lib/types";
  * volte. Non lo è: le due divergono su **cosa fanno dell'esito**, e la
  * differenza è di prodotto.
  *
- * Qui un profilo privato **blocca**, perché il video non sarebbe scaricabile e
- * l'analisi fallirebbe dopo aver pagato. Là non blocca: aggiungere un profilo
- * privato alla watchlist è legittimo — potrebbe tornare pubblico, e nel
- * frattempo non costa nulla. Qui un `422` viene ingoiato; là diventa un errore
- * accanto al campo.
+ * Qui un profilo privato fa sparire la card, e con essa il pulsante che
+ * contiene, perché il video non sarebbe scaricabile e l'analisi fallirebbe dopo
+ * aver pagato. Là il blocco arriva per un'altra ragione — un creator privato in
+ * watchlist fa lavorare il cron a vuoto a ogni giro — ma l'esito per l'utente
+ * ora è lo stesso: **un profilo privato non si può seguire da nessuna delle due
+ * schermate**. Non è così da sempre: fino al 16 agosto 2026 il form dei creator
+ * si limitava ad avvisare.
+ *
+ * Restano diverse le altre due cose: qui un `422` viene ingoiato, là diventa un
+ * errore accanto al campo; e qui l'esito diventa una stringa d'avviso, là va
+ * grezzo a una card che sa renderlo da sé.
  *
  * Fonderle richiederebbe di scegliere una delle due semantiche, cioè di
  * cambiare il comportamento di una delle due pagine. La sola parte davvero

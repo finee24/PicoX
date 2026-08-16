@@ -76,19 +76,21 @@ function AddCreatorForm() {
   // di prodotto, non di implementazione.
   //
   //   * qui l'esito grezzo va alla card, che sa mostrare da sé "privato" e "non
-  //     trovato"; là diventa una stringa d'avviso e la card sparisce;
-  //   * qui blocca **solo** l'account inesistente — un profilo privato si può
-  //     comunque aggiungere alla watchlist, magari tornerà pubblico; là blocca
-  //     anche il privato, perché un video di un profilo privato non è
-  //     scaricabile e l'analisi fallirebbe *dopo* aver pagato;
+  //     trovato"; là diventa una stringa d'avviso e la card sparisce del tutto,
+  //     insieme al pulsante che ci sta dentro;
   //   * qui un 422 diventa un errore di campo; là viene ingoiato, perché su un
   //     link di un Reel l'autore non è ricavabile e non saperlo non è un motivo
   //     per impedire un'analisi che funziona.
   //
-  // Unificarli richiederebbe di scegliere una di queste semantiche, cioè di
-  // cambiare il comportamento di una delle due pagine. Se un domani servisse
-  // davvero, la cosa da estrarre è il solo guardiano "vince l'ultima richiesta",
-  // non la macchina a stati.
+  // **Su chi si può seguire i due ora concordano**, e prima no: qui il profilo
+  // privato non bloccava. Non è stata un'unificazione, sono arrivati allo stesso
+  // punto per strade diverse — là perché un video privato non è scaricabile,
+  // qui perché un creator privato in watchlist fa lavorare il cron a vuoto per
+  // sempre. Restano due implementazioni perché restano diverse le altre due
+  // righe qui sopra, non per inerzia.
+  //
+  // Se un domani servisse davvero fonderle, la cosa da estrarre è il solo
+  // guardiano "vince l'ultima richiesta", non la macchina a stati.
   const richiestaCorrente = useRef("");
 
   const verificaAccount = useMutation({
@@ -184,12 +186,28 @@ function AddCreatorForm() {
     },
   });
 
-  // La verifica è un aiuto, non un cancello: l'unico caso in cui blocca è
-  // l'account che il provider ha detto non esistere, dove aggiungere
-  // produrrebbe solo un creator che il cron non troverà mai. Un profilo
-  // privato, o una verifica non riuscita, lasciano l'utente libero di
-  // procedere.
-  const bloccatoDallaVerifica = validation !== null && !validation.exists;
+  // Si blocca quando il provider ha detto qualcosa di definitivo sull'account:
+  // non esiste, oppure esiste ma è privato. In entrambi i casi aggiungerlo
+  // produce un creator che non genererà mai un insight.
+  //
+  // Sul profilo privato la regola è cambiata, e vale la pena dire perché. Prima
+  // si avvisava soltanto, con l'argomento che un account può tornare pubblico e
+  // che la decisione è di chi lo aggiunge. L'argomento regge, ma nessuno aveva
+  // seguito cosa succede dopo: `creators` non ha una colonna che ricordi lo
+  // stato privato, quindi il cron non può saperlo. Enumera i creator attivi e
+  // chiama Apify per ciascuno **a ogni giro, per sempre**, su un profilo da cui
+  // non tornerà mai un video. In più lo slot resta occupato: 30 attivi sul
+  // piano gratuito.
+  //
+  // Un avviso che l'utente può ignorare gli fa scegliere fra due cose di cui
+  // vede solo una — nella schermata non c'è nulla che dica «e continuerà a
+  // costare». Finché quello stato non è persistito e il cron non lo salta,
+  // «avvisa» e «lascia fare» non sono la stessa cosa.
+  //
+  // Una verifica **non riuscita** invece non blocca: lì non sappiamo nulla
+  // dell'account, e non sapere non è un motivo per impedire.
+  const bloccatoDallaVerifica =
+    validation !== null && (!validation.exists || !validation.is_public);
 
   function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();

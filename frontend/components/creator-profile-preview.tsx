@@ -14,9 +14,14 @@ import { cn } from "@/lib/utils";
 /**
  * Esito di una verifica, in forma di card.
  *
- * Vive in un componente proprio e non dentro il form dei creator perché lo
- * stesso esito va mostrato in due punti — l'aggiunta manuale e l'anteprima
- * accanto a un insight — e due copie divergerebbero alla prima modifica.
+ * Vive in un componente proprio e non dentro il form dei creator perché la
+ * resa di un esito è un'altra cosa dal deciderne le conseguenze: qui si sceglie
+ * *come si vede* che un account è privato, altrove *se questo impedisce di
+ * aggiungerlo*.
+ *
+ * (Una versione precedente di questo commento diceva che la card è mostrata in
+ * due punti. Non lo è: la dashboard usa `creator-preview-card.tsx`, che è un
+ * componente diverso con un'azione propria.)
  *
  * Non chiama nulla: riceve l'esito già ottenuto. Chi la usa decide **quando**
  * validare, ed è una decisione che costa denaro (l'endpoint dietro chiama API a
@@ -99,15 +104,20 @@ export function CreatorProfilePreview({
       </div>
 
       {/* Un profilo privato esiste ed è mostrabile, ma i suoi video non sono
-          raggiungibili: monitorarlo non produrrebbe alcun insight. Si avvisa
-          invece di bloccare — un account può tornare pubblico, e la decisione
-          resta di chi lo sta aggiungendo. */}
+          raggiungibili: monitorarlo non produrrebbe alcun insight, e nel
+          frattempo il cron continuerebbe a interrogarlo a ogni giro occupando
+          uno slot del piano. Da qui il blocco — il ragionamento per esteso sta
+          accanto a `bloccatoDallaVerifica` in `creators-view.tsx`.
+
+          Il testo dice cosa fare, non solo cosa non si può fare: senza il
+          "riprova quando sarà pubblico" un utente resta davanti a un pulsante
+          spento senza sapere se il problema è suo. */}
       {!isPublic && (
         <p className="flex items-start gap-2 text-sm text-amber-400">
           <Lock className="mt-0.5 size-4 shrink-0" aria-hidden />
           <span>
-            Profilo privato: i video non sono accessibili, quindi non potranno essere analizzati
-            finché resta così.
+            Profilo privato: i suoi video non sono accessibili, quindi non c&apos;è nulla da
+            analizzare. Non puoi monitorarlo finché resta così — riprova se diventerà pubblico.
           </span>
         </p>
       )}

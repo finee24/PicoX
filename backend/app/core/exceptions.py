@@ -178,6 +178,26 @@ class VideoTooLongError(PicoxValidationError):
     default_message = "Il video supera la durata massima consentita."
 
 
+class PrivateProfileError(PicoxValidationError):
+    """L'account esiste ma è privato: monitorarlo non produrrebbe alcun insight.
+
+    422 come `VideoTooLargeError` e `VideoTooLongError`, ed è lo stesso motivo:
+    il body è ben formato ma la *risorsa che indica* non è lavorabile. Non 409 —
+    non c'è nulla in conflitto — e non 403, che parlerebbe di un permesso
+    dell'utente quando il vincolo è una proprietà del profilo altrui.
+
+    Codice proprio e non `validation_error` generico: il client deve poter dire
+    «questo profilo è privato» invece di «dati non validi», che manderebbe
+    l'utente a cercare un errore di battitura nell'username.
+    """
+
+    code = "creator_is_private"
+    default_message = (
+        "Questo profilo è privato: i suoi video non sono accessibili, quindi non "
+        "c'è nulla da analizzare. Riprova se diventerà pubblico."
+    )
+
+
 class ExternalServiceError(PicoxError):
     """Fallimento di un provider esterno (Gemini, Apify, download del media).
 

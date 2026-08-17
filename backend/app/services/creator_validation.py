@@ -178,6 +178,27 @@ def _handle_da_url(url: str) -> TargetValidazione:
     return TargetValidazione(piattaforma, _normalizza_handle(segmenti[0]))
 
 
+def _target_da_handle(platform: Platform, handle: str) -> TargetValidazione:
+    """Da un handle **nudo** — non un URL — a `(piattaforma, identificatore)`.
+
+    Un id di canale YouTube è case-sensitive, e qui arriva senza contesto: il
+    ramo dell'URL lo riconosce dal prefisso `/channel/`, questo non ha alcun
+    prefisso da guardare se non l'identificatore stesso. Senza il controllo
+    `UCaaa…` diventava `ucaaa…`, non superava più `is_channel_id`, finiva su
+    `forHandle` e il canale risultava inesistente — un "non esiste" su un
+    account che esiste, cioè il difetto che questa verifica esiste per evitare.
+
+    Sta in una funzione propria perché ha **due** chiamanti che devono per forza
+    concordare: `parse_creator_input`, che produce la chiave con cui la riga di
+    cache viene *scritta*, e `cached_validation`, che produce quella con cui
+    viene *riletta*. Due normalizzazioni divergenti qui non darebbero un errore:
+    darebbero un cache miss silenzioso, cioè una guardia che non guarda.
+    """
+    return TargetValidazione(
+        platform, _normalizza_handle(handle, minuscolo=not is_channel_id(handle.lstrip("@")))
+    )
+
+
 def parse_creator_input(raw: str, platform: Platform | None) -> TargetValidazione:
     """Da ciò che l'utente ha scritto a `(piattaforma, handle)`.
 
@@ -209,15 +230,7 @@ def parse_creator_input(raw: str, platform: Platform | None) -> TargetValidazion
             "lo stesso username può esistere su Instagram, TikTok e YouTube."
         )
 
-    # Un id di canale YouTube è case-sensitive, e qui arriva **nudo**: il ramo
-    # dell'URL lo riconosce dal prefisso `/channel/`, questo non ha alcun
-    # prefisso da guardare se non l'identificatore stesso. Senza questa riga
-    # `UCaaa…` diventava `ucaaa…`, non superava più `_is_channel_id`, finiva su
-    # `forHandle` e il canale risultava inesistente — un "non esiste" su un
-    # account che esiste, cioè il difetto che questa verifica esiste per evitare.
-    return TargetValidazione(
-        platform, _normalizza_handle(testo, minuscolo=not is_channel_id(testo.lstrip("@")))
-    )
+    return _target_da_handle(platform, testo)
 
 
 # =============================================================================
@@ -519,3 +532,24 @@ async def validate_creator(
     # Invertire l'ordine sposterebbe la scadenza fino a 24 ore.
     await _scrivi_cache(target, esito)
     return _senza_istante_esatto(esito, settings)
+
+
+async def cached_validation(
+    *, platform: Platform, username: str, settings: Settings
+) -> CreatorValidationResponse | None:
+    """Ciò che si sa già di questo account, **senza mai chiamare un provider**.
+
+    `None` quando non si sa nulla: riga assente, scaduta, o scritta con uno
+    schema che non si legge più. È la stessa risposta per tutti e tre i casi
+    perché portano alla stessa conclusione — non abbiamo un'informazione
+    aggiornata su questo account — e chi chiama deve trattarla come tale.
+
+    Esiste per far controllare a `POST /api/v1/creators` ciò che la verifica ha
+    già scoperto, a costo zero. La differenza con `validate_creator` è tutta qui:
+    quella *ottiene* un esito e per farlo può pagare Apify o la Data API e
+    consumare la quota giornaliera; questa si limita a **leggere**. Aggiungere un
+    creator non è un'azione che deve poter costare denaro, né esaurire una quota
+    che serve altrove: se non c'è già una risposta in cache, non si va a
+    cercarla.
+    """
+    return await _leggi_cache(_target_da_handle(platform, username), settings)

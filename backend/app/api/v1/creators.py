@@ -7,6 +7,11 @@ produce zero righe invece di una fuga di dati.
 I filtri su `user_id` sono comunque scritti esplicitamente. Sono ridondanti
 rispetto alle policy — ed è il punto: se un giorno una policy venisse allentata,
 l'API non cambierebbe comportamento.
+
+Unica eccezione, e non riguarda dati di un utente: la creazione legge la cache
+condivisa `creator_validations` col service-role, perché quella tabella non ha
+un proprietario su cui scopare (migration `0010`). È una lettura di ciò che si
+sa di un profilo pubblico altrui, non di righe di qualcuno.
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Response, status
 
 from app.core.config import Settings, get_settings
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError, PrivateProfileError
 from app.core.security import CurrentUser
 from app.middleware.error_handler import SafeRoute
 from app.schemas.creators import (
@@ -30,7 +35,7 @@ from app.schemas.creators import (
     CreatorValidationResponse,
 )
 from app.services.apify_service import ApifyService, get_apify_service
-from app.services.creator_validation import validate_creator
+from app.services.creator_validation import cached_validation, validate_creator
 from app.services.supabase_service import db_errors, scoped_table
 from app.services.youtube_service import YouTubeService, get_youtube_service
 
@@ -53,7 +58,12 @@ router = APIRouter(prefix="/api/v1/creators", tags=["creators"], route_class=Saf
                 "raggiunto (`plan_limit_reached`)."
             )
         },
-        422: {"description": "Dati del creator non validi."},
+        422: {
+            "description": (
+                "Dati del creator non validi, oppure profilo noto come privato "
+                "(`creator_is_private`)."
+            )
+        },
     },
 )
 async def create_creator(
@@ -66,7 +76,33 @@ async def create_creator(
     L'unicità di `(user_id, username, platform)` è garantita dal constraint del
     database: affidarsi a un SELECT preventivo lascerebbe aperta la finestra fra
     controllo e insert. La violazione viene tradotta in 409.
+
+    ## La guardia sui profili privati, e cosa **non** garantisce
+
+    Un profilo privato non ha video accessibili: monitorarlo non produrrebbe mai
+    un insight, mentre il cron continuerebbe a interrogarlo a ogni giro e uno
+    slot del piano resterebbe occupato. L'interfaccia lo impedisce già; qui la
+    stessa regola vale anche per chi chiama l'API direttamente.
+
+    **È una guardia parziale, e di proposito.** Interroga solo ciò che la cache
+    delle validazioni sa già: su un cache miss *lascia passare*. Non è una svista
+    da chiudere in un secondo momento — chiuderla significherebbe validare a ogni
+    creazione, cioè pagare un provider e consumare la quota giornaliera di
+    verifiche dentro un endpoint che oggi non costa nulla, e trasformare
+    l'indisponibilità di Apify in un'impossibilità di aggiungere creator. Il
+    percorso normale passa comunque dalla verifica, che riempie la cache un
+    istante prima: il buco vero è chi salta l'interfaccia di proposito, e per
+    quello il costo di chiuderlo è più alto del danno, che ricade su di lui.
     """
+    esito = await cached_validation(
+        platform=payload.platform, username=payload.username, settings=settings
+    )
+    # `exists` va guardato per primo: su un account inesistente `is_public` è
+    # falso perché non c'è nulla di pubblico, non perché sia privato. Bloccare
+    # anche quel caso sarebbe un'altra decisione, non un dettaglio di questa.
+    if esito is not None and esito.exists and not esito.is_public:
+        raise PrivateProfileError()
+
     # `user_id` non compare: lo inietta `ScopedTable.insert`, che ignora di
     # proposito qualunque proprietario passato nel payload.
     record: dict[str, Any] = {

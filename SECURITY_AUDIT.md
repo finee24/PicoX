@@ -33,7 +33,7 @@ documento copre tutte e sette le sezioni.
 | 3 | Audit delle dipendenze | Chiusa — 0 vulnerabilità in produzione, 1 solo dev |
 | 4 | Segreti sulla cronologia git completa | Chiusa — pulita, nessun segreto mai committato |
 | 5 | Leak di informazioni negli errori | Chiusa — zero leak su 28 scenari; 1 finding minore |
-| 6 | Esecuzioni sovrapposte del cron | Chiusa — corretta, **PR non ancora mergiata** |
+| 6 | Esecuzioni sovrapposte del cron | Chiusa — corretta e **mergiata** (`ee547a2`); resta solo `CRON_ENABLED` (vedi A14) |
 | 7 | Readiness per il billing | Chiusa — A1 e A2 poi corrette (`0006`, `0007`); il resto resta raccomandazione |
 
 ---
@@ -463,9 +463,9 @@ d'errore nel buco che il CORS ristretto chiude.
 
 ---
 
-## A7 🟡 Il rifiuto della preflight CORS è fuori dall'envelope
+## A7 🟢 Il rifiuto della preflight CORS è fuori dall'envelope — **CHIUSA PER SCELTA** (11 agosto 2026)
 
-**Origine**: sezione 5 · **Stato**: aperto — **raccomandazione: non correggere**
+**Origine**: sezione 5 · **Stato**: **chiusa per scelta** — non si corregge
 
 Una preflight da origin non ammesso risponde `400 text/plain "Disallowed CORS
 origin"`, generato da Starlette, fuori dal formato `{"error": {...}}` usato
@@ -615,13 +615,15 @@ non nel target.
 due richieste parallele sui due URL → **1 sola inferenza**.
 
 **Dipendenza risolta**: la copertura di `normalize_video_url` differita con
-**A10** è inclusa in questi 51 test, ora che la funzione è ferma.
+**A10** sono i 51 test di `tests/test_canonicalizzazione_url.py` qui sopra, ora
+che la funzione è ferma — non i 9 di `test_chiave_unificata.py`, che la usano
+solo come helper.
 
 ---
 
-## A10 🟠 Copertura di `media_service` — **parte SSRF CHIUSA** (11 agosto 2026)
+## A10 🟢 Copertura di `media_service` — **CHIUSA** (11 agosto 2026)
 
-**Origine**: sezione 1 · **Stato**: parziale — SSRF fatto, `normalize_video_url` differito con A9
+**Origine**: sezione 1 · **Stato**: **fatto** — entrambe le parti
 
 La fixture `downloads` di `conftest.py` è `autouse` e sostituisce
 `download_to_temp` in tutta la suite: per molto tempo nessun test ha esercitato
@@ -653,10 +655,14 @@ test che non può fallire non è copertura.
 | Catena di redirect infinita | si ferma al tetto |
 | Messaggio d'errore | non riporta né l'IP né l'host: sarebbe un oracolo per mappare la rete |
 
-**Resta aperta** la parte su `normalize_video_url`, deliberatamente: fissare ora
-il comportamento della chiave di cache vincolerebbe la decisione di **A9**, che
-deve poter cambiare quanto si normalizza senza rischiare di fondere video
-distinti.
+**Fatto anche `normalize_video_url`**, una volta che A9 ha fermato la funzione:
+**51 test** in `tests/test_canonicalizzazione_url.py` (equivalenze per
+piattaforma, gruppo di controllo sulla vecchia logica, risorse distinte che
+devono restare distinte, idempotenza) e **12** in
+`tests/test_normalizzazione_host.py` (porta esplicita, alias di host,
+credenziali nell'URL, host assente). Era differita perché fissarne il
+comportamento prima della decisione di A9 avrebbe vincolato quanto si
+normalizza; presa quella decisione, il motivo del rinvio è caduto.
 
 ---
 
@@ -766,24 +772,32 @@ vero il limite di durata in produzione.
 
 ---
 
-## A14 ⏳ Azioni in sospeso sul lavoro già fatto
+## A14 ⏳ Resta solo accendere `CRON_ENABLED`
 
-**Stato**: parziale — codice completo e verificato, non ancora in produzione
+**Stato**: due passi su tre sono fatti — manca **solo** `CRON_ENABLED=true`
 
-1. La PR **`fix-cron-overlap`** (commit `22ea530`) è pushata ma **non mergiata**:
-   `main` è a `3992ab2`. Finché non è mergiata, il cron resta senza guardia — ma
-   è irrilevante, perché non lo invoca nessuno.
-2. La migration **`0005_job_locks.sql` non è applicata** al database.
-3. **`CRON_ENABLED` è `false`** in `render.yaml`.
+L'ordine per accendere il cron è vincolato — **merge → migration `0005` →
+`CRON_ENABLED=true`** — e i primi due anelli sono chiusi.
 
-L'ordine per accendere il cron è vincolato: **merge → migration `0005` →
-`CRON_ENABLED=true`**. Applicare la migration prima del merge è innocuo;
-accendere `CRON_ENABLED` prima della migration fa fallire ogni giro
-nell'acquisizione del lock.
+1. ~~La PR **`fix-cron-overlap`** è pushata ma non mergiata~~ — **mergiata**. Il
+   lavoro è in `main` come `ee547a2` («Fix cron overlap: un giro per volta, e il
+   cron spento finché non lo si accende»), entrato con uno squash che lascia
+   fuori da `main` il commit di branch `22ea530` citato nella prima stesura.
+   Verificato sul repo il 19 agosto 2026: `main` è a `e05398e`, non a `3992ab2`.
+2. ~~La migration **`0005_job_locks.sql` non è applicata**~~ — **applicata** il
+   15 agosto 2026, insieme alla `0010`, sul progetto `jaimkiagtolxbkftjapx`.
+   Verificato subito dopo: RLS attivo, zero policy, nessun privilegio ad `anon`
+   e `authenticated`. Verbale in `docs/archive/PROGRESS-2026-08-15.md`.
+3. **`CRON_ENABLED` è ancora `false`** in `backend/render.yaml` — l'unico passo
+   rimasto. Accenderlo prima della `0005` avrebbe fatto fallire ogni giro
+   nell'acquisizione del lock; quel vincolo ora è soddisfatto.
 
 Nota di contesto: **Render non risulta aver mai deployato** — `picox-api.onrender.com`
-risponde 404 su `/health` e su `/`. Un servizio con nome diverso non sarebbe
-rilevato da questa verifica.
+risponde `x-render-routing: no-server` su `/health` e su `/`, verificato il 19
+agosto 2026. L'header è dell'edge di Render e dice che per quell'hostname **non
+esiste alcun servizio**, non che manchi una rotta; il corpo è `Not Found` in
+`text/plain`, non l'envelope JSON che risponderebbe FastAPI. Un servizio con
+nome diverso non sarebbe rilevato da questa verifica.
 
 ---
 
@@ -894,7 +908,7 @@ gestione abbonamento: Stripe fa tutte e tre. Il lavoro vero è in **A1**, **A3**
 | A11 | `check_env.py`: non carica `.env`, crasha su cp1252 | 1 | A | **fatto** | n/d | — |
 | A12 | TODO minori frontend + `.env.example` disallineato | 1 | A | **fatto** (3 su 4; il quarto lasciato per scelta) | n/d | — |
 | A13 | `docker compose up` mai eseguito | 1 | A | **parziale**: verifica statica fatta e pin della distro corretto; end-to-end ancora bloccata da Docker assente | n/d | — |
-| A14 | PR cron da mergiare, `0005` da applicare, `CRON_ENABLED` | 6 | A | parziale | n/d — azione manuale | basso |
+| A14 | Accendere il cron: resta solo `CRON_ENABLED` | 6 | A | **quasi fatto** — merge (`ee547a2`) e `0005` applicata; manca `CRON_ENABLED=true` | n/d — azione manuale | basso |
 | — | Chiave `service_role` trapelata e ruotata | 1 | — | **fatto** | — | — |
 | — | `profiles` scrivibile da `authenticated` (GRANT) | 1 | — | **fatto** (`0002`) | — | — |
 | — | `TRUNCATE` esente da RLS su tutte le tabelle | 1 | — | **fatto** (`0002`) | — | — |
@@ -926,12 +940,14 @@ gestione abbonamento: Stripe fa tutte e tre. Il lavoro vero è in **A1**, **A3**
 7. **A4** — la risposta al Sybil, da decidere insieme al pricing. Attenzione al
    punto 4 della voce: configurare un SMTP proprio **rimuove** la protezione di
    fatto che c'è oggi.
-8. **La scelta sull'ID come chiave di cache** (coda di A9): non è una modifica
-   alla normalizzazione ma di schema, e oggi costa quanto non costerà mai più —
-   1 riga in `insights`.
+8. ~~**La scelta sull'ID come chiave di cache**~~ (coda di A9) — **fatta**
+   l'11 agosto 2026, migration `0009`: `insights.cache_key` porta l'identità del
+   video, `video_url` resta il valore mostrato. Dettaglio in A9, punto 3.
 9. Solo allora la **Categoria B**, quando Stripe entrerà davvero.
 
-Della Categoria A restano **due voci** e **due decisioni**. Le voci: **A4**
-(Sybil) e **A13** (verifica bloccata da Docker). Le decisioni: la risposta al
-Sybil, e se separare la chiave di cache dall'URL mostrato. Nessuna è rossa e
-nessuna blocca lo sviluppo di feature nuove.
+Della Categoria A restano **tre voci** e **una decisione**. Le voci: **A4**
+(Sybil), **A13** (verifica bloccata da Docker) e **A14** — che non è un finding
+da decidere come le altre due, ma un solo passo da eseguire: portare
+`CRON_ENABLED` a `true`, con entrambi i prerequisiti già fatti. La decisione: la
+risposta al Sybil. Nessuna è rossa e nessuna blocca lo sviluppo di feature
+nuove.

@@ -341,10 +341,14 @@ l'installazione della PWA, quindi si prova solo sul dominio di produzione.
 
 ```mermaid
 erDiagram
-    auth_users ||--|| profiles  : "1:1 (PK = FK)"
-    auth_users ||--o{ creators  : "possiede"
-    auth_users ||--o{ insights  : "possiede"
-    creators   ||--o{ insights  : "genera (nullable)"
+    auth_users ||--|| profiles          : "1:1 (PK = FK)"
+    auth_users ||--|| subscriptions     : "1:1 (PK = FK)"
+    auth_users ||--o{ creators          : "possiede"
+    auth_users ||--o{ insights          : "possiede"
+    auth_users ||--o{ analysis_events   : "traccia (quota giornaliera)"
+    auth_users ||--o{ validation_events : "traccia (quota giornaliera)"
+    auth_users ||--o{ analysis_locks    : "detiene (lock a TTL)"
+    creators   ||--o{ insights          : "genera (nullable)"
 
     auth_users {
         uuid id PK
@@ -383,6 +387,43 @@ erDiagram
         jsonb inverse_script_template
         text_array keywords
         timestamptz created_at
+    }
+    analysis_events {
+        uuid id PK
+        uuid user_id FK "ON DELETE CASCADE"
+        text video_url
+        text analysis_mode "INFO | STYLE | BOTH"
+        timestamptz created_at "colonna su cui si conta la quota, in UTC"
+    }
+    validation_events {
+        uuid id PK
+        uuid user_id FK "ON DELETE CASCADE"
+        text platform "instagram | tiktok | youtube_shorts"
+        text normalized_identifier
+        timestamptz created_at "colonna su cui si conta la quota, in UTC"
+    }
+    analysis_locks {
+        uuid user_id PK "FK auth.users, ON DELETE CASCADE"
+        text cache_key PK "stessa stringa di insights.cache_key, non l'URL"
+        text analysis_mode PK "INFO | STYLE | BOTH"
+        timestamptz locked_at
+        timestamptz expires_at "oltre questo istante il lock e' sottraibile"
+    }
+    %% creator_validations non e' collegata a auth_users: e' condivisa fra
+    %% tutti gli utenti (cache pubblica), niente colonna user_id.
+    creator_validations {
+        text platform PK
+        text normalized_identifier PK
+        jsonb response
+        timestamptz checked_at
+    }
+    %% job_locks non e' collegata a auth_users: il perimetro di un giro di cron
+    %% e' l'intera istanza, non un utente. Niente colonna user_id.
+    job_locks {
+        text job_name PK "es. cron:check-updates"
+        timestamptz locked_at
+        timestamptz expires_at "oltre questo istante il lock e' sottraibile"
+        text holder "host/pid di chi lo detiene, solo diagnostico"
     }
 ```
 
@@ -589,17 +630,106 @@ registra la modalità con cui quel video è stato effettivamente analizzato, che
 resta valida anche se in seguito l'utente cambia la preferenza sul creator o se
 l'insight arriva da link singolo (nessun creator).
 
+#### `analysis_locks`
+
+Lock a scadenza sulle analisi in corso: una riga per `(utente, video, modalità)`
+finché l'analisi è in volo. Introdotta dalla migration `0003`, ri-chiavata dalla
+`0009`.
+
+| Colonna | Tipo | Note |
+| --- | --- | --- |
+| `user_id` | `uuid` | PK insieme alle due colonne seguenti; FK → `auth.users(id)` `ON DELETE CASCADE` |
+| `cache_key` | `text` | PK — **la stessa stringa di `insights.cache_key`**, non l'URL mostrato |
+| `analysis_mode` | `text` | PK, `CHECK IN ('INFO','STYLE','BOTH')` |
+| `locked_at` | `timestamptz` | `NOT NULL DEFAULT now()` |
+| `expires_at` | `timestamptz` | `NOT NULL`; oltre questo istante il lock è considerato abbandonato e può essere sottratto |
+
+**Il vincolo di unicità deduplica la riga, non il lavoro.** `UNIQUE (user_id,
+cache_key)` su `insights` impedisce la riga duplicata, ma fra la lettura della
+cache e la scrittura del risultato passa l'intera pipeline — Apify, download,
+inferenza — e in quella finestra nulla fermava una seconda richiesta. Misurato
+prima della `0003`: 3 POST concorrenti sullo stesso video producevano 3 chiamate
+Gemini, 3 run Apify e 3 download, per finire in **una sola riga**.
+
+**Una tabella e non `pg_advisory_lock`.** Il backend non ha una connessione
+Postgres da tenere aperta: parla col database solo via PostgREST, in HTTP. Un
+lock di sessione richiederebbe di trattenere quella sessione per tutta l'analisi,
+e su una connessione poolata resterebbe orfano.
+
+**Il lock scade da solo**, e non dipende da un `finally`. L'acquisizione è in due
+passi, entrambi atomici: `INSERT`, e in caso di collisione
+`UPDATE ... WHERE expires_at <= now()`, che riesce solo se il lock esistente è
+scaduto e in tal caso lo sottrae. Un processo ucciso da OOM o un container
+riavviato a metà deploy non lasciano nulla di bloccato per sempre.
+
+**La chiave deve restare quella della cache.** La `0009` ha rinominato qui
+`video_url` in `cache_key` per questo: con la cache su una chiave e il lock su
+un'altra, due richieste sullo stesso video raggiunto da URL diversi otterrebbero
+lock distinti e pagherebbero entrambe — il difetto che la `0003` esiste per
+chiudere, riaperto dalla porta di servizio.
+
+Il TTL (`ANALYSIS_LOCK_TTL_SECONDS`, 2400s) è un **vincolo di correttezza**, non
+una preferenza: deve superare il caso peggiore di un'analisi legittima, retry di
+Gemini inclusi. Se scadesse prima, un'altra richiesta sottrarrebbe il lock a
+un'analisi ancora in corso e la doppia spesa tornerebbe.
+
+Indice `analysis_locks_expires_at_idx` su `expires_at`. Nessun privilegio ad
+`anon` e `authenticated`, RLS attivo senza policy: è coordinamento interno al
+backend, non un dato dell'utente.
+
+#### `job_locks`
+
+Lock a scadenza per job pianificati, uno per `job_name`: garantisce che sia in
+esecuzione un giro per volta, anche fra istanze diverse. Introdotta dalla
+migration `0005`.
+
+| Colonna | Tipo | Note |
+| --- | --- | --- |
+| `job_name` | `text` | PK. `text` e non un enum: aggiungere un job non deve richiedere una migration. Oggi un solo valore, `cron:check-updates` |
+| `locked_at` | `timestamptz` | `NOT NULL DEFAULT now()` |
+| `expires_at` | `timestamptz` | `NOT NULL`; oltre questo istante il lock è sottraibile |
+| `holder` | `text` | `host/pid` di chi lo detiene — **solo diagnostico** |
+
+**Stesso meccanismo di `analysis_locks`, perimetro diverso.** Là la contesa è per
+`(utente, video, modalità)`; qui è l'intero giro di cron, che non appartiene ad
+alcun utente: **non c'è una colonna `user_id`**. È per questo che `job_locks` sta
+in `_UNSCOPED_ALLOWED`, accanto a `creators` e `creator_validations`.
+
+**`holder` non partecipa ad alcuna decisione.** Serve a sapere quale istanza
+fosse morta, davanti a un lock scaduto e sottratto. Fidarsi di un valore scritto
+dal detentore precedente reintrodurrebbe il problema che la scadenza risolve.
+
+Il TTL (`CRON_LOCK_TTL_SECONDS`, 1800s) **non è la durata massima di un giro** —
+quella, nel caso pessimo, è di decine di ore — ma il limite di quanto si accetta
+di restare fermi per un processo morto a metà. Se scade durante un giro lungo si
+torna al comportamento precedente, non a qualcosa di peggio: le analisi restano
+protette da `analysis_locks`.
+
+Indice `job_locks_expires_at_idx` su `expires_at`. Nessun privilegio ad `anon` e
+`authenticated`, RLS attivo senza policy.
+
 ### Relazioni
 
 | Da | A | Cardinalità | On delete |
 | --- | --- | --- | --- |
-| `profiles.id` | `auth.users.id` | 1:1 | `CASCADE` |
+| `profiles.id` | `auth.users.id` | 1:1 (PK = FK) | `CASCADE` |
+| `subscriptions.user_id` | `auth.users.id` | 1:1 (PK = FK) | `CASCADE` |
 | `creators.user_id` | `auth.users.id` | 1:N | `CASCADE` |
 | `insights.user_id` | `auth.users.id` | 1:N | `CASCADE` |
 | `insights.creator_id` | `creators.id` | 1:N (opzionale) | `SET NULL` |
+| `analysis_events.user_id` | `auth.users.id` | 1:N | `CASCADE` |
+| `validation_events.user_id` | `auth.users.id` | 1:N | `CASCADE` |
+| `analysis_locks.user_id` | `auth.users.id` | 1:N | `CASCADE` |
 
-La cancellazione dell'account rimuove per cascata profilo, creator e insight:
-un solo `DELETE` su `auth.users` soddisfa una richiesta di cancellazione dati.
+La cancellazione dell'account rimuove per cascata profilo, sottoscrizione,
+creator, insight, eventi di quota e lock di analisi: un solo `DELETE` su
+`auth.users` soddisfa una richiesta di cancellazione dati.
+
+**Due tabelle non hanno alcuna FK, ed è deliberato.** `creator_validations` è una
+cache condivisa di informazioni già pubbliche, senza colonna `user_id`;
+`job_locks` coordina le istanze fra loro e il suo perimetro è il giro di cron,
+non un utente. Nessuna delle due contiene dati personali, quindi non c'è nulla da
+cancellare in cascata.
 
 ### Indici
 
@@ -612,27 +742,50 @@ un solo `DELETE` su `auth.users` soddisfa una richiesta di cancellazione dati.
 | `insights_video_url_idx` | `btree (video_url)` | Lookup per URL a prescindere dall'utente. Residuo di quando `video_url` era anche la chiave: la deduplica passa ora dal vincolo su `cache_key` |
 | `insights_user_id_cache_key_key` | `UNIQUE (user_id, cache_key)` | Vincolo di cache (sotto) — copre anche le query con prefisso `user_id`, che sono tutte quelle del lookup |
 | `creators_user_id_username_platform_key` | `UNIQUE (user_id, username, platform)` | Idempotenza dell'aggiunta creator |
+| `analysis_events_user_created_idx` | `btree (user_id, created_at DESC)` | Il trigger di quota conta a ogni insert le righe del giorno di quell'utente: senza, il costo del controllo cresce con lo storico |
+| `validation_events_user_created_idx` | `btree (user_id, created_at DESC)` | Stesso ruolo, sul secondo endpoint a consumo |
+| `creator_validations_checked_at_idx` | `btree (checked_at)` | Individua le righe oltre il TTL applicativo di 24h |
+| `analysis_locks_expires_at_idx` | `btree (expires_at)` | L'acquisizione filtra sempre sui lock scaduti; serve anche a un'eventuale potatura massiva |
+| `job_locks_expires_at_idx` | `btree (expires_at)` | Idem, sui lock dei job pianificati |
 
 Gli indici su `user_id` non servono solo alle query applicative: le policy RLS
 aggiungono un predicato `user_id = auth.uid()` a **ogni** statement, quindi sono
 il percorso di accesso di fatto della tabella.
 
+Non sono elencate le primary key, che l'indice se lo creano da sé. Due però sono
+composite e valgono come percorso di accesso principale della loro tabella:
+`analysis_locks (user_id, cache_key, analysis_mode)` e
+`creator_validations (platform, normalized_identifier)`.
+
 ### Scelte di design
 
-#### `UNIQUE (user_id, video_url)` — cache anti-duplicati
+#### `UNIQUE (user_id, cache_key)` — cache anti-duplicati
 
 Ogni analisi costa: una chiamata di scraping ad Apify e un'inferenza multimodale
 su Gemini. Il vincolo rende impossibile, a livello di database, avere due righe
 per lo stesso video dello stesso utente.
 
+**La chiave non è l'URL.** Fino alla migration `0009` il vincolo era
+`UNIQUE (user_id, video_url)`, e quella colonna faceva due mestieri
+incompatibili: *cosa si mostra* — `video_url` finisce in un `href` cliccabile —
+e *cosa identifica*. Lo stesso video TikTok è raggiungibile con username diversi
+nel path: come URL da mostrare sono due valori legittimi e distinti, come
+identità sono lo stesso video, e finché la chiave era l'URL si pagavano due
+analisi. `cache_key` è ora l'identità (`<host>:<id>` quando la piattaforma è
+nota, altrimenti l'URL normalizzato); `video_url` torna a fare solo il primo
+mestiere.
+
 Il flusso lato backend diventa:
 
-1. `SELECT` su `(user_id, video_url)`;
+1. `SELECT` su `(user_id, cache_key)`;
 2. **cache hit** → si restituisce la riga esistente, zero chiamate esterne;
-3. **cache miss** → scraping, analisi, `INSERT ... ON CONFLICT (user_id, video_url) DO NOTHING`.
+3. **cache miss** → scraping, analisi, `UPSERT ... ON CONFLICT (user_id, cache_key) DO UPDATE`.
 
 Lo step 3 chiude anche la race condition fra due richieste concorrenti sullo
 stesso video: la seconda viene assorbita dal vincolo invece di duplicare la riga.
+Il vincolo però deduplica la **riga**, non il **lavoro**: fra la lettura della
+cache e la scrittura passa l'intera pipeline, ed è `analysis_locks` — che arbitra
+sulla stessa `cache_key` — a evitare di pagare due volte l'inferenza.
 
 La chiave è per utente, non globale: due utenti che analizzano lo stesso video
 ottengono due righe indipendenti. È voluto — isolamento dei dati, ognuno resta
@@ -642,10 +795,11 @@ riutilizzo cross-tenant dell'output AI (copiare il payload già calcolato in una
 nuova riga invece di rieseguire l'inferenza), come ottimizzazione applicativa
 futura e non come condivisione di righe.
 
-> Nota: `video_url` è la chiave naturale, quindi va **normalizzata prima della
-> scrittura** (rimozione di `?igshid=`, `utm_*`, slash finale, host equivalenti).
-> Senza normalizzazione lo stesso video con due URL diversi supera il vincolo e
-> paga due volte l'analisi. Responsabilità del backend.
+> Nota: `cache_key` la calcola `media_service.canonical_cache_key`, **una volta
+> sola** dentro `perform_analysis` e mai come parametro passato dall'esterno: due
+> chiamanti che la calcolassero diversamente riaprirebbero la divergenza che la
+> `0009` esiste per chiudere. Cache di lettura, target dell'upsert, lock sulle
+> analisi concorrenti e dedup del cron devono guardare la stessa stringa.
 
 #### `ON DELETE SET NULL` su `insights.creator_id`
 
@@ -668,14 +822,40 @@ cancellazione deve propagarsi.
 
 ### Row Level Security
 
-RLS abilitato su `profiles`, `creators`, `insights`. Per ogni tabella quattro
-policy separate — `SELECT`, `INSERT`, `UPDATE`, `DELETE` — tutte `TO authenticated`:
+**RLS è abilitato su tutte e nove le tabelle di `public`**, in due regimi
+diversi — ed è la distinzione che conta:
 
-| Tabella | Predicato |
-| --- | --- |
-| `profiles` | `auth.uid() = id` |
-| `creators` | `auth.uid() = user_id` |
-| `insights` | `auth.uid() = user_id` |
+| Regime | Tabelle | Cosa raggiunge un client autenticato |
+| --- | --- | --- |
+| Policy per l'utente | `profiles`, `creators`, `insights` | Le proprie righe, secondo il predicato più sotto |
+| RLS attivo **senza policy** | `subscriptions`, `analysis_events`, `validation_events`, `creator_validations`, `analysis_locks`, `job_locks` | Nulla: senza policy il RLS nega tutto |
+
+Il secondo regime non è un RLS dimenticato: è la configurazione più restrittiva
+che esista. Quelle sei tabelle hanno anche `REVOKE ALL ... FROM anon,
+authenticated` e `GRANT ALL ... TO service_role`, quindi le raggiunge solo il
+backend. I due strati sono ridondanti di proposito — se un domani un `GRANT`
+venisse concesso per errore, l'assenza di policy continuerebbe a negare tutto.
+
+#### Le tre tabelle con policy
+
+Quattro policy separate per tabella — `SELECT`, `INSERT`, `UPDATE`, `DELETE` —
+tutte `TO authenticated`:
+
+| Tabella | Predicato | Cosa può fare davvero un client |
+| --- | --- | --- |
+| `profiles` | `auth.uid() = id` | **Sola lettura**: la `0002` ha revocato `INSERT`, `UPDATE` e `DELETE` ad `authenticated` |
+| `creators` | `auth.uid() = user_id` | Lettura e scrittura |
+| `insights` | `auth.uid() = user_id` | **Sola lettura**: la `0004` ha revocato le scritture; scrive solo il backend, col client service-role |
+
+**Le policy da sole non dicono cosa è permesso.** Su `profiles` e `insights` le
+policy di scrittura esistono ancora, ma il `GRANT` sottostante no: il permesso
+effettivo è l'**intersezione** dei due strati, e leggere solo le policy darebbe
+una risposta sbagliata in senso permissivo — il verso peggiore. È la lezione
+della voce **A1** dell'audit, riprodotta e non dedotta: con
+`grant update on public.profiles to authenticated`, una `PATCH` diretta a
+PostgREST sulla propria riga passava sia `USING` sia `WITH CHECK`, perché la riga
+*è* dell'utente. Le policy filtrano le **righe**; la granularità per **colonna**,
+in PostgreSQL, esiste solo nei `GRANT`.
 
 Dettagli implementativi:
 
@@ -686,12 +866,14 @@ Dettagli implementativi:
 - **`(select auth.uid())` invece di `auth.uid()`**: PostgreSQL valuta la subquery
   una volta sola come InitPlan invece che per ogni riga — differenza sostanziale
   sulle scansioni ampie;
-- **`anon` non ha privilegi** sulle tre tabelle (`REVOKE ALL`): nessun dato di
-  Picox è pubblico;
+- **`anon` non ha privilegi su nessuna tabella di `public`** (`REVOKE ALL`):
+  nessun dato di Picox è pubblico, nemmeno `creator_validations`, il cui
+  contenuto lo sarebbe;
 - le policy di `insights` verificano inoltre che `creator_id` sia `NULL` oppure
   punti a un creator **dello stesso utente**. Senza questo controllo un client
   autenticato potrebbe agganciare i propri insight al creator di un altro tenant:
   non espone dati, ma corrompe l'integrità referenziale fra tenant.
+
 
 #### La Service Role Key bypassa il RLS — by design
 

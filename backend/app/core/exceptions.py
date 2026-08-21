@@ -121,6 +121,38 @@ class ValidationQuotaError(PicoxError):
     )
 
 
+class GlobalCapacityError(PicoxError):
+    """Il tetto di spesa globale del servizio è stato raggiunto (migration 0011).
+
+    **Il messaggio è deliberatamente generico, e non va reso più preciso.** Le
+    tre sorelle qui sopra dicono all'utente esattamente quale limite ha
+    raggiunto, perché è un limite *suo* e ha un rimedio suo. Questo no: è una
+    rete di sicurezza sull'intero servizio, e dire «tetto di spesa globale
+    raggiunto» rivelerebbe a chi sta sondando il sistema che esiste una soglia
+    aggregata — cioè che riempirla è un modo di fermare il servizio per tutti,
+    e quanto manca a riuscirci. Un attaccante che riceve «riprova più tardi»
+    non impara nulla; uno che riceve «tetto globale a $100» ha una mappa.
+
+    Per lo stesso motivo i numeri (spesa stimata, tetto) non compaiono qui:
+    vivono solo nel WARNING strutturato che `translate_postgrest_error`
+    registra nei log.
+
+    409 e non 503, benché il messaggio somigli a quello di un guasto. Un 503
+    dichiara un servizio non funzionante e invita al ritentativo — spesso
+    automatico, e con `Retry-After` per convenzione — mentre questa condizione
+    dura fino a mezzanotte UTC e i ritentativi la peggiorano. È la stessa
+    ragione per cui `AnalysisQuotaError` è 409 e non 429. Tenerlo distinto da
+    `DatabaseError` (503) serve anche al monitoraggio: un tetto raggiunto e un
+    database irraggiungibile non sono lo stesso incidente.
+    """
+
+    status_code = 409
+    code = "global_capacity_reached"
+    default_message = (
+        "Servizio momentaneamente non disponibile. Riprova più tardi."
+    )
+
+
 class AnalysisInProgressError(PicoxError):
     """Un'altra richiesta sta già analizzando questo video per questo utente.
 

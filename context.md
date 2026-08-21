@@ -44,9 +44,15 @@ In particolare, ultimo stato noto ma **non riconfermato di recente**:
 ## Task attivi
 
 ### A4 — rischio Sybil (più account)
-Aperto, nessuna azione decisa. Il tetto per piano limita un account, non N
-account creati con email usa e getta. Quattro opzioni sul tavolo, nessuna
-implementata — dettaglio completo in `SECURITY_AUDIT.md`, voce A4:
+**Parzialmente mitigata dal 22 agosto 2026**: l'opzione 4 (tetto globale di
+spesa) è implementata dalla migration `0011` — `spend_limits` più il trigger
+`enforce_global_spend_cap` su `analysis_events` e `validation_events`, che
+solleva `PX004` → `409 global_capacity_reached`. Chiude la spesa, **non** la
+registrazione di massa: chi crea abbastanza account può ancora esaurire il
+tetto e fermare il servizio per tutti — un'indisponibilità, non un costo.
+
+Restano da decidere le prime tre opzioni — dettaglio in `SECURITY_AUDIT.md`,
+voce A4:
 
 *(Nota: questo non è "vettore A" — quel nome, nei documenti sorgente, è già
 usato per il rate limit su `analyze-video`, chiuso con la migration `0008`.

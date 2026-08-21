@@ -425,6 +425,16 @@ erDiagram
         timestamptz expires_at "oltre questo istante il lock e' sottraibile"
         text holder "host/pid di chi lo detiene, solo diagnostico"
     }
+    %% spend_limits non e' collegata a auth_users per la stessa ragione di
+    %% job_locks, portata all'estremo: il suo perimetro e' l'intero servizio.
+    %% Riga unica, imposta dalla PK booleana.
+    spend_limits {
+        boolean id PK "sempre true: CHECK (id) ammette una riga sola"
+        numeric daily_cap_usd "tetto giornaliero dell'intero servizio"
+        numeric cost_per_analysis_usd
+        numeric cost_per_validation_usd
+        timestamptz updated_at
+    }
 ```
 
 Tutte le tabelle vivono nello schema `public`; `auth.users` è gestita da
@@ -708,6 +718,68 @@ protette da `analysis_locks`.
 Indice `job_locks_expires_at_idx` su `expires_at`. Nessun privilegio ad `anon` e
 `authenticated`, RLS attivo senza policy.
 
+#### `spend_limits`
+
+Riga unica con il tetto di spesa giornaliero dell'**intero servizio** e i costi
+unitari con cui la spesa viene stimata. Introdotta dalla migration `0011`.
+
+| Colonna | Tipo | Note |
+| --- | --- | --- |
+| `id` | `boolean` | PK con `DEFAULT true` e `CHECK (id)`: ammette esattamente una riga, un secondo `INSERT` collide sulla PK |
+| `daily_cap_usd` | `numeric(12,4)` | `CHECK > 0`. Valore di partenza `100.00` |
+| `cost_per_analysis_usd` | `numeric(12,6)` | `0.035` — da `0008`: ~$0,032 Gemini + ~$0,0027 Apify |
+| `cost_per_validation_usd` | `numeric(12,6)` | `0.003` — da `0010`: Apify per un profilo IG/TikTok |
+| `updated_at` | `timestamptz` | `NOT NULL DEFAULT now()` |
+
+**È una rete di sicurezza, non una quota.** I tre limiti per piano (`PX001`,
+`PX002`, `PX003`) rispondono a «questo utente ha esaurito ciò che il suo piano
+gli concede?». Questo risponde a «il servizio nel suo insieme ha speso troppo
+oggi?», ed è l'unico che non scala con il numero di account — cioè l'unico che
+copre il rischio Sybil della voce A4 dell'audit.
+
+`estimated_spend_today_usd()` somma le righe di oggi in `analysis_events` e
+`validation_events`, ciascuna moltiplicata per il proprio costo unitario. Il
+trigger `enforce_global_spend_cap`, installato su **entrambe** le tabelle,
+rifiuta la riga che porterebbe la stima sopra `daily_cap_usd` sollevando `PX004`
+→ `409 global_capacity_reached`.
+
+Due proprietà del trigger che non si deducono dal nome:
+
+- **La condizione è `>`, non `>=`**: passa la riga che raggiunge esattamente il
+  tetto, si rifiuta quella che lo supera. Con `>=` un tetto dichiarato di 100
+  dollari sarebbe di fatto 99,965.
+- **Se `spend_limits` è vuota non si blocca nulla.** Una tabella di
+  configurazione svuotata per errore deve degradare verso «nessun tetto», non
+  verso «servizio fermo»: il primo si vede nella fattura, il secondo sarebbe
+  un'interruzione totale con una causa difficile da trovare.
+
+**L'ordine dei trigger è significativo.** Postgres esegue i trigger `BEFORE ROW`
+dello stesso evento in ordine alfabetico di nome, e i nomi sono scelti perché
+il limite più specifico arrivi per primo:
+
+```
+analysis_events_enforce_quota      <  analysis_events_enforce_spend_cap
+validation_events_enforce_quota    <  validation_events_enforce_spend_cap
+```
+
+Chi supera insieme la propria quota e il tetto globale legge «hai esaurito le
+analisi di oggi», che è una condizione sua e ha un rimedio, non «servizio
+momentaneamente non disponibile», che manderebbe a cercare un guasto
+inesistente. Rinominare uno di questi trigger cambia quale errore vede
+l'utente, non solo un'etichetta.
+
+**Verso il client il messaggio resta generico, di proposito.** A differenza
+delle tre quote per piano, `global_capacity_reached` non dice quale limite sia
+stato raggiunto né a quanto stia: rivelarlo darebbe a chi sonda il sistema la
+mappa di quanto manca a fermare il servizio per tutti. I numeri vivono solo nel
+`WARNING` strutturato che `translate_postgrest_error` registra — ed è anche il
+primo punto del sistema che misura la spesa invece di dedurla (voce B4).
+
+Nessun privilegio ad `anon` e `authenticated`, RLS attivo senza policy. Qui la
+riservatezza conta più che altrove: chi potesse leggere questa tabella saprebbe
+quanto manca al blocco, chi potesse scriverla alzerebbe il tetto invece di
+aggirarlo.
+
 ### Relazioni
 
 | Da | A | Cardinalità | On delete |
@@ -828,7 +900,7 @@ diversi — ed è la distinzione che conta:
 | Regime | Tabelle | Cosa raggiunge un client autenticato |
 | --- | --- | --- |
 | Policy per l'utente | `profiles`, `creators`, `insights` | Le proprie righe, secondo il predicato più sotto |
-| RLS attivo **senza policy** | `subscriptions`, `analysis_events`, `validation_events`, `creator_validations`, `analysis_locks`, `job_locks` | Nulla: senza policy il RLS nega tutto |
+| RLS attivo **senza policy** | `subscriptions`, `analysis_events`, `validation_events`, `creator_validations`, `analysis_locks`, `job_locks`, `spend_limits` | Nulla: senza policy il RLS nega tutto |
 
 Il secondo regime non è un RLS dimenticato: è la configurazione più restrittiva
 che esista. Quelle sei tabelle hanno anche `REVOKE ALL ... FROM anon,

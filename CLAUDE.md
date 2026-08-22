@@ -61,6 +61,10 @@ richiesta.
   `require_tests.py` non chiude il turno se `pytest` fallisce su modifiche in
   `backend/`. Se un turno si chiude senza che siano scattati dove dovevano,
   verifica perché — vedi `.claude/hooks/README.md`.
+- **Frontend** (`frontend/AGENTS.md`, caricato da `frontend/CLAUDE.md`):
+  questo Next.js ha breaking changes rispetto a quanto un modello ricorda —
+  leggi `node_modules/next/dist/docs/` prima di scrivere codice. Lo rigenera
+  `next dev`: se ricompare in un diff non toglierlo, committalo.
 - **Skill** (`.claude/skills/`): convenzioni HTTP/REST delle route in
   `api-conventions`; come strutturare prompt e `response_schema` per Gemini
   nella skill Gemini. Consultale prima di improvvisare una convenzione nuova.

@@ -123,4 +123,7 @@ jobs:
           NEXT_PUBLIC_SUPABASE_URL: https://esempio.supabase.co
           NEXT_PUBLIC_SUPABASE_ANON_KEY: chiave-anon-fittizia-per-il-build
           NEXT_PUBLIC_BACKEND_URL: http://localhost:8000
+          # Sitekey di test pubblica di Cloudflare: qui serve solo a non far
+          # fallire `lib/env.ts`, il build non contatta Turnstile.
+          NEXT_PUBLIC_TURNSTILE_SITE_KEY: 1x00000000000000000000AA
         run: npm run build

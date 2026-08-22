@@ -114,8 +114,19 @@ on conflict (id) do nothing;
 -- `>= date_trunc('day', now())` e non `created_at::date = current_date`: la
 -- seconda forma non e' sargable e ignorerebbe `analysis_events_user_created_idx`
 -- e `validation_events_user_created_idx`, trasformando due conteggi su poche
--- righe in due scansioni complete. Il confronto e' in UTC, come `now()`: il
--- "giorno" e' quello del database, coerente con i tre tetti per piano.
+-- righe in due scansioni complete.
+--
+-- ATTENZIONE AL CONFINE DEL GIORNO. `date_trunc('day', <timestamptz>)` tronca
+-- rispetto al **TimeZone della sessione**, non a UTC: e' UTC solo perche' le
+-- sessioni di questo progetto girano con `TimeZone = UTC`, che e' il default di
+-- Supabase e non un vincolo espresso da questo SQL. La forma e' identica a
+-- quella gia' usata da `enforce_analysis_quota` (`0008`) e
+-- `enforce_validation_quota` (`0010`), quindi i quattro limiti condividono
+-- **lo stesso** confine di giornata: e' la proprieta' che conta, ed e' il
+-- motivo per cui qui non si diverge dalle due migration precedenti. Se un
+-- giorno si vorra' ancorare il confine a UTC nel codice invece che nella
+-- configurazione, va fatto sulle tre insieme — cambiarne una sola creerebbe due
+-- "giorni" diversi nello stesso database.
 
 create or replace function public.estimated_spend_today_usd()
 returns numeric
@@ -160,13 +171,21 @@ revoke execute on function public.estimated_spend_today_usd() from public;
 --
 -- SE `spend_limits` E' VUOTA, NON SI BLOCCA NULLA.
 --
--- `estimated_spend_today_usd()` restituisce `null` senza riga di
--- configurazione, e un confronto con `null` non e' vero: il trigger lascia
--- passare. E' deliberato — una tabella di configurazione svuotata per errore
--- deve degradare verso "nessun tetto", non verso "servizio fermo". Il rischio
--- speculare (spendere senza rete) e' visibile nei log e nella fattura; un
--- servizio bloccato da una riga mancante sarebbe un'interruzione totale con
--- una causa difficile da trovare.
+-- Il meccanismo e' la guardia esplicita `if tetto is null or costo_riga is
+-- null then return new`, qui sotto: senza riga di configurazione il `select
+-- ... into` non trova nulla e lascia entrambe le variabili a `null`, quindi si
+-- esce prima ancora di calcolare la spesa. E' deliberato — una tabella di
+-- configurazione svuotata per errore deve degradare verso "nessun tetto", non
+-- verso "servizio fermo". Il rischio speculare (spendere senza rete) e'
+-- visibile nei log e nella fattura; un servizio bloccato da una riga mancante
+-- sarebbe un'interruzione totale con una causa difficile da trovare.
+--
+-- La stessa guardia copre un secondo caso, che non e' un errore di
+-- configurazione ma di installazione: se questo trigger finisse su una tabella
+-- diversa dalle due previste, il `case` su `tg_table_name` non troverebbe un
+-- costo unitario e `costo_riga` sarebbe `null`. Anche li' si lascia passare —
+-- un trigger installato dove non doveva non deve poter bloccare scritture che
+-- nessuno ha mai inteso limitare.
 
 create or replace function public.enforce_global_spend_cap()
 returns trigger

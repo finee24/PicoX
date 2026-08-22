@@ -36,6 +36,21 @@ antenato di `main` (`git merge-base --is-ancestor`).
 la PR è mergiata (`ee547a2`, presente in `main`) e la migration `0005` è
 applicata dal 15 agosto. Resta solo accenderlo.
 
+**La migration `0011` (tetto globale di spesa) è applicata** al progetto di
+produzione `jaimkiagtolxbkftjapx` dal **22 agosto 2026** — non riapplicarla.
+Verificata sul database reale con utente usa e getta, poi eliminato con 0
+residui: la riga esattamente al tetto passa (la condizione è `>`, non `>=`),
+quella successiva è rifiutata con `PX004`, analisi e validazioni contano nella
+stessa somma, e sotto violazione simultanea arriva `PX002` — il limite
+specifico dell'utente — non `PX004`. `daily_cap_usd` è a `100.00`.
+
+Attenzione alla sequenza: il database ha il trigger **prima** che il codice che
+traduce `PX004` sia su `main` (PR #10 aperta, non mergiata). Finché è così, un
+`PX004` verrebbe tradotto dal backend nel ramo generico — `503
+database_unavailable` invece di `409 global_capacity_reached`. Senza
+conseguenze pratiche oggi, perché su Render non risulta alcun servizio
+deployato, ma va saputo.
+
 In particolare, ultimo stato noto ma **non riconfermato di recente**:
 
 - Se `main` è allineato a `origin/main` — lo squash-merge locale non
@@ -96,6 +111,14 @@ Deliberato, priorità bassa: risolverli con una `HEAD` metterebbe una chiamata
 di rete nel percorso della cache key. La via migliore — ri-chiavare dopo lo
 scraping, che già risolve il link — tocca `perform_analysis` e il lock: è un
 intervento a sé, non ancora pianificato.
+
+### Confine del giorno delle quote — UTC per configurazione, non per codice
+Deliberato, priorità bassa. I tre trigger di quota (`0008`, `0010`, `0011`)
+usano `date_trunc('day', now())` per il confine del giorno — in pratica UTC
+perché è il default della sessione Supabase, non perché il codice lo
+garantisca. Allinearli esplicitamente a UTC è un lavoro a sé, va fatto ai tre
+insieme se mai lo si fa: cambiarne uno solo creerebbe due "giorni" diversi
+nello stesso database.
 
 ### Instagram non verificato per il parametro Apify mancante; YouTube ha un residuo di rischio sul ramo di fallback
 

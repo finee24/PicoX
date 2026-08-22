@@ -2,12 +2,13 @@
 
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Loader2, MailCheck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { TurnstileWidget, type TurnstileHandle } from "@/components/turnstile-widget";
 import { safeInternalPath } from "@/lib/safe-redirect";
 import { getSupabaseBrowserClient } from "@/lib/supabase-client";
 
@@ -63,10 +64,23 @@ export function AuthForm({ mode, redirectTo, expired }: AuthFormProps) {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [confirmationSent, setConfirmationSent] = useState(false);
+  // Solo la registrazione ha il captcha: l'accesso e il recupero password non
+  // creano account, quindi non alimentano il vettore Sybil della voce A4.
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+  const turnstileRef = useRef<TurnstileHandle>(null);
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
+
+    // Fermarsi qui invece di lasciar partire la richiesta: senza token Supabase
+    // risponderebbe comunque con un errore di captcha, ma tradotto per l'utente
+    // suonerebbe come un guasto invece che come "manca un passaggio".
+    if (isRegister && !captchaToken) {
+      setError("Completa la verifica antispam qui sotto per continuare.");
+      return;
+    }
+
     setPending(true);
 
     const supabase = getSupabaseBrowserClient();
@@ -78,6 +92,10 @@ export function AuthForm({ mode, redirectTo, expired }: AuthFormProps) {
           password,
           options: {
             emailRedirectTo: `${window.location.origin}/auth/callback`,
+            // Nome del parametro verificato sui tipi di @supabase/auth-js
+            // 2.112.2 installato (`SignUpWithPasswordCredentials`), non preso
+            // dalla documentazione generica.
+            captchaToken: captchaToken ?? undefined,
           },
         });
 
@@ -120,6 +138,13 @@ export function AuthForm({ mode, redirectTo, expired }: AuthFormProps) {
       setError("Si è verificato un errore imprevisto. Riprova.");
     } finally {
       setPending(false);
+      // Dopo OGNI tentativo, riuscito o fallito. Un token Turnstile vale una
+      // volta sola: senza reset il secondo invio ne manderebbe uno gia' speso e
+      // Supabase lo rifiuterebbe, mentre all'utente il widget resterebbe
+      // spuntato di verde — un fallimento senza nulla che lo spieghi.
+      if (isRegister) {
+        turnstileRef.current?.reset();
+      }
     }
   }
 
@@ -185,6 +210,10 @@ export function AuthForm({ mode, redirectTo, expired }: AuthFormProps) {
           disabled={pending}
         />
       </div>
+
+      {isRegister && (
+        <TurnstileWidget ref={turnstileRef} onToken={setCaptchaToken} />
+      )}
 
       {error && (
         <p

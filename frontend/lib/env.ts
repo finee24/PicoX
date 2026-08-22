@@ -5,7 +5,7 @@
  * stringa letterale, quindi va referenziato per intero: `process.env[nome]`
  * con un indice dinamico non viene sostituito e a runtime risulta `undefined`.
  *
- * Queste tre sono le **uniche** variabili ammesse nel frontend. Ogni altra
+ * Queste quattro sono le **uniche** variabili ammesse nel frontend. Ogni altra
  * `NEXT_PUBLIC_*` finirebbe comunque nel bundle servito al browser.
  */
 
@@ -34,3 +34,22 @@ export const BACKEND_URL = required(
   process.env.NEXT_PUBLIC_BACKEND_URL,
   "NEXT_PUBLIC_BACKEND_URL",
 ).replace(/\/+$/, "");
+
+/**
+ * Sitekey del widget Turnstile sul form di registrazione.
+ *
+ * È pubblica per progetto: sta nell'HTML di chiunque apra la pagina, e non c'è
+ * nulla da proteggere nel tenerla nel bundle. La metà che conta — la secret con
+ * cui si verifica il token — non vive in questo repo: il signup non passa dal
+ * nostro backend, e la verifica la fa Supabase Auth, configurata dalla sua
+ * dashboard.
+ *
+ * `required` come le altre tre, e non opzionale con degrado silenzioso. Se
+ * mancasse, il widget sparirebbe dal form e ogni registrazione fallirebbe
+ * contro Supabase — che il captcha lo pretende comunque — con un errore che non
+ * dice dove cercare. Meglio fallire subito e per il motivo giusto.
+ */
+export const TURNSTILE_SITE_KEY = required(
+  process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY,
+  "NEXT_PUBLIC_TURNSTILE_SITE_KEY",
+);

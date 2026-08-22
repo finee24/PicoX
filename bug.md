@@ -247,3 +247,53 @@ applicativo.
 > un'indagine. Se ricapita, cattura il testo esatto dell'errore di bind
 > sulla porta 8001: accorcerebbe la diagnosi futura più di qualunque altra
 > aggiunta qui.
+
+---
+
+### Un componente client non si idrata: nessun effetto parte, console pulita
+
+**Quando/dove si è visto:** verifica manuale del widget Turnstile su
+`/register`. Il markup del componente c'era (contenitore renderizzato dal
+server), ma nessun `useEffect` girava: script mai iniettato, `window.turnstile`
+`undefined`, contenitore vuoto. **Zero errori in console** — è la parte che
+manda fuori strada.
+
+Il sintomo era mascherato da una scelta di comodo: `/register` reindirizza a
+`/dashboard` chi ha una sessione (`proxy.ts:65`), quindi per vedere il form
+senza toccare i cookie di sessione avevo aperto la pagina dall'IP di rete
+(`192.168.178.143:3000`) invece che da `localhost`.
+
+**Ipotesi scartate, e perché:**
+- *"`next/script` non inietta il tag"* — sembrava dimostrata: nessuno dei 18
+  `<script>` in pagina puntava a challenges.cloudflare.com, e iniettando lo
+  **stesso** URL a mano nella **stessa** pagina il widget compariva e produceva
+  il token. Sembrava un esperimento controllato, e non lo era: l'iniezione
+  manuale girava nella console, che non ha bisogno dell'idratazione, mentre il
+  componente sì. Ho riscritto il componente su questa base — codice buttato.
+- *CSP, sitekey, dominio* — esclusi dallo stesso esperimento: il widget
+  renderizzava e restituiva il token, quindi nulla li stava bloccando.
+
+**Causa reale:** Next dev **blocca le richieste cross-origin alle proprie
+risorse** quando la pagina è servita da un host diverso da quello di sviluppo.
+Aprendo da `192.168.178.143` i chunk `/_next/static/chunks/*` venivano
+rifiutati, React non si idratava, e nessun effetto partiva. L'avviso non
+compare in console del browser: sta **nel log del dev server**, ed è l'unico
+posto dove guardare.
+
+```
+⚠ Blocked cross-origin request to Next.js dev resource /_next/static/chunks/...
+Cross-origin access to Next.js dev resources is blocked by default for safety.
+```
+
+**Fix:** `allowedDevOrigins: ["192.168.178.143"]` in `next.config.ts`, **solo
+per la durata della verifica**, poi rimosso — non è una modifica che serve al
+prodotto. Con l'idratazione ripristinata **entrambe** le versioni funzionano, e
+`next/script` è tornata quella buona.
+
+La lezione riusabile non è su Turnstile: quando un componente client sembra
+morto e la console è pulita, **il log del dev server è la prima cosa da
+leggere**, non l'ultima. E un esperimento eseguito dalla console non prova nulla
+sul codice del componente, perché salta esattamente il passaggio — l'idratazione
+— che poteva essere rotto.
+
+Pointer: PR sul branch `turnstile-signup`, `components/turnstile-widget.tsx`.

@@ -145,7 +145,12 @@ fi
 # Next.js sostituisce ogni `NEXT_PUBLIC_*` a build time con una stringa
 # letterale dentro il bundle: l'elenco di quelle ammesse è una decisione di
 # sicurezza, non una convenzione.
-AMMESSE="NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_ANON_KEY NEXT_PUBLIC_BACKEND_URL"
+# NEXT_PUBLIC_TURNSTILE_SITE_KEY: una sitekey Turnstile e' pubblica per
+# progetto — sta nell'HTML di chiunque apra la pagina di registrazione, ed e'
+# cosi' per progetto di Cloudflare. La meta' che va protetta e' la secret con
+# cui si verifica il token, che non vive in questo repo: il signup non passa
+# dal backend di Picox, la verifica la fa Supabase Auth.
+AMMESSE="NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_ANON_KEY NEXT_PUBLIC_BACKEND_URL NEXT_PUBLIC_TURNSTILE_SITE_KEY"
 usate=$(tracciati | grep -E '^frontend/' | xargs -r grep -oh -E 'NEXT_PUBLIC_[A-Z0-9_]+' 2>/dev/null | sort -u || true)
 non_ammesse=""
 for nome in $usate; do

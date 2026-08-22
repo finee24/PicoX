@@ -53,6 +53,7 @@ from app.core.exceptions import (
     AnalysisQuotaError,
     ConflictError,
     DatabaseError,
+    GlobalCapacityError,
     PlanLimitError,
     ValidationQuotaError,
 )
@@ -74,6 +75,23 @@ _ANALYSIS_QUOTA: Final = "PX002"
 # stesso motivo per cui esiste il secondo: «hai troppi creator», «hai esaurito
 # le analisi» e «hai esaurito le verifiche» sono tre istruzioni diverse.
 _VALIDATION_QUOTA: Final = "PX003"
+# Sollevato da `enforce_global_spend_cap` (migration 0011). Quarto codice, ma di
+# natura diversa dai tre sopra: quelli sono limiti del singolo utente e vanno
+# spiegati; questo è una rete di sicurezza sull'intero servizio e verso il
+# client resta **generico** di proposito. Il codice separato serve qui dentro,
+# perché il backend deve poterlo registrare come incidente invece che come
+# normale rifiuto di quota — non serve al client, che non deve saperlo.
+_GLOBAL_SPEND_CAP: Final = "PX004"
+
+# Campi che `enforce_global_spend_cap` mette nel `detail` dell'eccezione, nella
+# forma `chiave=valore;chiave=valore`. Si fermano nei log: sono esattamente i
+# numeri che direbbero a chi sonda il sistema quanto manca al blocco.
+_CAMPI_SPESA: Final[tuple[str, ...]] = (
+    "spend_today_usd",
+    "row_cost_usd",
+    "daily_cap_usd",
+    "source_table",
+)
 
 # `profiles` è scopata sulla PK, non su una colonna `user_id`.
 _SCOPE_COLUMN: Final[dict[str, str]] = {
@@ -294,6 +312,25 @@ async def unscoped_service_table(table: str, *, reason: str) -> AsyncRequestBuil
 # =============================================================================
 
 
+def _dettagli_spesa(details: str | None) -> dict[str, str]:
+    """Estrae i campi strutturati dal `detail` di `PX004`.
+
+    Tollerante di proposito. Se il formato cambia, o un campo manca, si registra
+    comunque il WARNING con quello che c'è: un log d'allarme che sparisce per un
+    errore di parsing sarebbe molto peggio di un log incompleto, ed è l'unico
+    posto in cui la spesa stimata del giorno viene scritta da qualche parte.
+    """
+    if not details:
+        return {}
+
+    estratti: dict[str, str] = {}
+    for pezzo in details.split(";"):
+        chiave, separatore, valore = pezzo.partition("=")
+        if separatore and chiave.strip() in _CAMPI_SPESA:
+            estratti[chiave.strip()] = valore.strip()
+    return estratti
+
+
 def translate_postgrest_error(exc: APIError, *, context: str) -> Exception:
     """Converte un errore PostgREST in un'eccezione di dominio.
 
@@ -317,6 +354,30 @@ def translate_postgrest_error(exc: APIError, *, context: str) -> Exception:
     if code == _VALIDATION_QUOTA:
         logger.info("Quota giornaliera di validazioni esaurita (%s): %s", context, exc.message)
         return ValidationQuotaError()
+
+    if code == _GLOBAL_SPEND_CAP:
+        dettagli = _dettagli_spesa(getattr(exc, "details", None))
+        # WARNING e non INFO come le tre quote qui sopra, che sono il sistema
+        # che funziona come previsto. Questa è la rete di sicurezza che
+        # interviene: quando compare, qualcosa è già andato storto — un abuso
+        # distribuito, un difetto che riaccoda lavoro, un picco non previsto — e
+        # il servizio è appena diventato indisponibile per tutti, non per chi ha
+        # fatto la richiesta.
+        #
+        # È anche l'unico punto del sistema in cui la spesa stimata del giorno
+        # viene registrata: il dato che la voce B4 dell'audit chiede e che oggi
+        # non esiste altrove. I campi passano da `extra=` perché
+        # `JsonLogFormatter` promuove a chiave di primo livello tutto ciò che
+        # non è un attributo standard di `LogRecord` — quindi diventano
+        # interrogabili senza dover rileggere il testo del messaggio.
+        logger.warning(
+            "Tetto di spesa globale raggiunto (%s): stimati %s USD su un tetto di %s USD",
+            context,
+            dettagli.get("spend_today_usd", "?"),
+            dettagli.get("daily_cap_usd", "?"),
+            extra={"evento": "tetto_spesa_globale", **dettagli},
+        )
+        return GlobalCapacityError()
 
     if code == _PLAN_LIMIT:
         # Senza questo ramo il limite di piano finirebbe nel caso generico qui

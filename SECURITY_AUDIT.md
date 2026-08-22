@@ -292,7 +292,7 @@ piano. La variante che contava le righe di `insights` è stata scartata perché
 
 ## A4 🟠 Rischio Sybil — il tetto limita un account, non N account
 
-**Origine**: sezione 2 · **Stato**: aperto, nessuna azione decisa
+**Origine**: sezione 2 · **Stato**: **parzialmente mitigata** — opzione 4 implementata (migration `0011`); la scelta fra le opzioni 1-3 resta aperta
 
 Chi registra N account ottiene N × 30 creator attivi e il costo torna a scalare
 linearmente. L'unica barriera oggi è la verifica email di Supabase Auth, che alza
@@ -304,11 +304,33 @@ gratuiti e automatizzabili.
 - **Opzione 1** — CAPTCHA al signup.
 - **Opzione 2** — limite di registrazioni per IP o per dominio email.
 - **Opzione 3** — verifica della carta anche sul piano gratuito.
-- **Opzione 4** — tetto globale di spesa lato Apify/Gemini, come rete di
-  sicurezza indipendente dal numero di account.
+- ~~**Opzione 4**~~ — tetto globale di spesa lato Apify/Gemini, come rete di
+  sicurezza indipendente dal numero di account: **fatta**, migration `0011`.
 
 L'opzione 4 è l'unica che protegge **anche** dagli scenari non previsti, ed è la
-più economica da mettere: non richiede codice.
+più economica da mettere. **Correzione**: questa voce diceva anche «non richiede
+codice», e implementandola si è rivelato falso — servono un SQLSTATE nuovo
+(`PX004`), la sua traduzione, un'eccezione dedicata e il log strutturato. Poco
+codice, ma non zero.
+
+### Cosa l'opzione 4 chiude, e cosa lascia aperto
+
+Chiude il **danno**: nessun numero di account può far spendere più di
+`spend_limits.daily_cap_usd` in un giorno, e la protezione non dipende dal
+riconoscere l'attaccante. Copre quindi anche gli scenari non previsti — un
+difetto nostro che riaccoda lavoro, un picco legittimo — che le opzioni 1-3, per
+costruzione, non vedono.
+
+Non chiude la **registrazione di massa**: gli account continuano a potersi
+creare, e chi ne crea abbastanza può esaurire il tetto globale e fermare il
+servizio per tutti. È un'indisponibilità, non una spesa — un danno diverso e
+molto meno costoso, ma un danno. Le opzioni 1-3 restano quindi sul tavolo, ed è
+per questo che questa voce è mitigata e non chiusa.
+
+Il tetto ha inoltre due limiti dichiarati nella migration stessa: **non conta la
+spesa del cron** (che scrive fuori da `analysis_events`, per la scelta della
+`0008` di tenere due budget separati) e **non conta la quota YouTube**, che è
+una risorsa scarsa globale ma non monetaria.
 
 ### Il segnale log-only: **non implementato, e non per pigrizia**
 
@@ -898,7 +920,7 @@ gestione abbonamento: Stripe fa tutte e tre. Il lavoro vero è in **A1**, **A3**
 | A1 | Auto-promozione `subscription_tier` via futuro GRANT | 7 (radice 1) | A | **fatto** (`0006`) | n/d | — |
 | A2 | Downgrade non retroattivo sui creator attivi | 7 (da 0004) | A | **fatto** (`0007`) | n/d | — |
 | A3 | Vettore A — nessun rate limit su `analyze-video` | 2 | A | **fatto** (`0008`) | n/d | — |
-| A4 | Rischio Sybil con più account | 2 | A | aperto — il segnale log-only è **superfluo**: il dato esiste già in `auth.audit_log_entries` | **no** — 4 opzioni | da stimare |
+| A4 | Rischio Sybil con più account | 2 | A | **parziale** — opzione 4 (tetto globale, `0011`) fatta: chiude la spesa, non la registrazione di massa. Opzioni 1-3 ancora da decidere; il segnale log-only resta **superfluo**, il dato esiste già in `auth.audit_log_entries` | **no** — 3 opzioni residue | da stimare |
 | A5 | Audit delle dipendenze | 3 | A | **fatto** — 0 in produzione, 1 solo dev fuori perimetro | n/d | — |
 | A6 | 500 fuori da `SafeRoute` senza header CORS | 5 | A | **fatto** | n/d | — |
 | A7 | Preflight CORS fuori dall'envelope | 5 | A | **chiusa per scelta**: non si corregge | n/d | — |

@@ -91,8 +91,13 @@ class FakeAPIError(APIError):
     un percorso d'errore che in produzione non esiste.
     """
 
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__({"message": message, "code": code, "hint": "", "details": ""})
+    def __init__(self, code: str, message: str, details: str = "") -> None:
+        # `details` è il campo in cui `enforce_global_spend_cap` (migration
+        # 0011) mette i numeri della spesa: il messaggio resta generico e i
+        # numeri viaggiano di lato, perché il primo può finire sotto gli occhi
+        # di qualcuno e i secondi no. Ha un default vuoto perché nessuno degli
+        # altri SQLSTATE lo usa.
+        super().__init__({"message": message, "code": code, "hint": "", "details": details})
 
 
 class FakeResult:

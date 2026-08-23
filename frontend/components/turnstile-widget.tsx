@@ -140,7 +140,21 @@ export function TurnstileWidget({ onToken, ref }: TurnstileWidgetProps) {
         `onLoad` il widget non verrebbe mai istanziato la seconda volta.
       */}
       <Script src={SCRIPT_SRC} strategy="afterInteractive" onReady={() => setScriptPronto(true)} />
-      <div ref={containerRef} />
+      {/*
+        `min-h` e non un'altezza fissa: lo spazio esiste gia' prima che
+        Cloudflare risponda, ma il contenitore puo' crescere se un giorno il
+        widget rendera' piu' alto del previsto.
+
+        71px e' misurato, non stimato: e' l'altezza che il widget occupa una
+        volta renderizzato. Senza questa riga il contenitore parte a zero e
+        cresce quando Cloudflare risponde, e siccome la card e' centrata
+        verticalmente **l'intero form salta di 43px verso l'alto** — misurato
+        anche quello. Chi clicca su un campo proprio in quell'istante manca il
+        bersaglio: non perde dati, perde un click, ed e' un difetto che colpisce
+        chi compila in fretta, cioe' esattamente chi non sta guardando il
+        layout.
+      */}
+      <div ref={containerRef} className="min-h-[71px]" />
     </>
   );
 }

@@ -12,12 +12,17 @@ il commit o la PR portano già il dettaglio. Non lasciarlo diventare un
 secondo PROGRESS.md: se una voce qui compie settimane senza essere toccata,
 è un segnale che va chiusa o rivista, non solo riletta.
 
+**Prima di aggiungere una voce, controlla la lunghezza** (metrica dell'hook:
+`read_text` utf-8, poi `len`). Se l'aggiunta porta sopra i 7.000 caratteri,
+comprimi o togli qualcosa di equivalente **nella stessa modifica** — non
+lasciare che il file scivoli sopra soglia e se ne accorga solo la sessione
+successiva.
+
 ## Prima di fidarti di questo file
 
 L'ho ricostruito da `PROGRESS.md` (ora archiviato in
 `docs/archive/PROGRESS-2026-08-15.md`) e `SECURITY_AUDIT.md`, che si sono
-dimostrati non affidabili al 100% sulla recency; le contraddizioni che
-avevano sono state riconciliate in `SECURITY_AUDIT.md` fra il 19 e il 22 agosto.
+dimostrati non affidabili al 100% sulla recency.
 Verifica quanto sotto contro il repo vero prima di agire:
 
 ```bash
@@ -27,12 +32,12 @@ gh pr list
 ```
 
 **`CRON_ENABLED` è `false` (`backend/render.yaml:73`), spento per scelta dal
-22 agosto 2026 — non dimenticato.** Sul piano tecnico non manca nulla: PR sul
-cron mergiata (`ee547a2`), migration `0005` applicata dal 15 agosto. Si è
-deciso di non spendere finché la data di lancio non è fissata: il cron ha senso
-solo con un deploy Render attivo, e quel deploy richiede una carta. Quando si
-riprende, l'ordine è quello di `backend/app/cron_config.md` — prima lo
-scheduler (passo 2, l'unico ancora da fare), **poi** `CRON_ENABLED=true`.
+22 agosto 2026 — non dimenticato.** Tecnicamente non manca nulla: PR sul cron
+mergiata (`ee547a2`), migration `0005` applicata dal 15 agosto. Si è deciso di
+non spendere finché la data di lancio non è fissata: il cron richiede un deploy
+Render attivo, e quel deploy richiede una carta. Quando si riprende, l'ordine è
+quello di `backend/app/cron_config.md` — prima lo scheduler (passo 2, l'unico
+da fare), **poi** `CRON_ENABLED=true`.
 Accenderlo prima non avvia nulla: apre soltanto
 `POST /api/v1/cron/check-updates` a chi ha `CRON_SECRET`.
 
@@ -40,11 +45,6 @@ Accenderlo prima non avvia nulla: apre soltanto
 (`jaimkiagtolxbkftjapx`) dal 22 agosto 2026 — non riapplicarla.** Verificata sul
 database reale con utente usa e getta, 0 residui; il verbale sta nel commit e
 nella migration stessa. `daily_cap_usd` è a `100.00`.
-
-In particolare, ultimo stato noto ma **non riconfermato di recente**:
-
-- Se `main` è allineato a `origin/main` — lo squash-merge locale non
-  garantisce da solo che sia stato pushato.
 
 ## Task attivi
 

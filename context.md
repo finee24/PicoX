@@ -16,7 +16,8 @@ secondo PROGRESS.md: se una voce qui compie settimane senza essere toccata,
 
 L'ho ricostruito da `PROGRESS.md` (ora archiviato in
 `docs/archive/PROGRESS-2026-08-15.md`) e `SECURITY_AUDIT.md`, che si sono
-dimostrati non affidabili al 100% sulla recency — vedi la sezione in fondo.
+dimostrati non affidabili al 100% sulla recency; le contraddizioni che
+avevano sono state riconciliate in `SECURITY_AUDIT.md` fra il 19 e il 22 agosto.
 Verifica quanto sotto contro il repo vero prima di agire:
 
 ```bash
@@ -25,38 +26,20 @@ git status
 gh pr list
 ```
 
-**Corretto il 18 agosto 2026**: la PR `fix-cron-overlap` **è mergiata** —
-commit `ee547a2` ("Fix cron overlap: un giro per volta"), dentro uno
-squash-merge di tre branch impilati che portò allora `main` a `686ad58`; oggi
-la punta è `e05398e`. Verificato sul repo il 19 agosto 2026: `ee547a2` è
-antenato di `main` (`git merge-base --is-ancestor`).
+**`CRON_ENABLED` è `false` (`backend/render.yaml:73`), spento per scelta dal
+22 agosto 2026 — non dimenticato.** Sul piano tecnico non manca nulla: PR sul
+cron mergiata (`ee547a2`), migration `0005` applicata dal 15 agosto. Si è
+deciso di non spendere finché la data di lancio non è fissata: il cron ha senso
+solo con un deploy Render attivo, e quel deploy richiede una carta. Quando si
+riprende, l'ordine è quello di `backend/app/cron_config.md` — prima lo
+scheduler (passo 2, l'unico ancora da fare), **poi** `CRON_ENABLED=true`.
+Accenderlo prima non avvia nulla: apre soltanto
+`POST /api/v1/cron/check-updates` a chi ha `CRON_SECRET`.
 
-**Verificato il 19 agosto 2026**: `CRON_ENABLED` è ancora `false`
-(`backend/render.yaml:73`), ma entrambi i prerequisiti sono confermati fatti —
-la PR è mergiata (`ee547a2`, presente in `main`) e la migration `0005` è
-applicata dal 15 agosto. Resta solo accenderlo.
-
-**In pausa deliberata dal 22 agosto 2026 — non dimenticata, non bloccata.**
-Tecnicamente non manca nulla: i due prerequisiti restano confermati fatti e
-l'ultimo passo è un solo valore da cambiare. La decisione è di **non spendere
-niente** finché la data di lancio non è fissata — accendere il cron ha senso
-solo con un deploy Render attivo, e quel deploy richiede una carta. Quindi il
-cron resta spento per scelta economica, non per un impedimento tecnico.
-
-**Quando riprenderlo:** quando si decide il drop, non prima. A quel punto
-l'ordine è quello di `backend/app/cron_config.md`: configurare lo scheduler
-(passo 2, l'unico ancora da fare) e **solo allora** portare `CRON_ENABLED` a
-`true`. Accenderlo prima che qualcosa chiami l'endpoint non fa partire nulla —
-apre soltanto `POST /api/v1/cron/check-updates` a chiunque abbia
-`CRON_SECRET`.
-
-**La migration `0011` (tetto globale di spesa) è applicata** al progetto di
-produzione `jaimkiagtolxbkftjapx` dal **22 agosto 2026** — non riapplicarla.
-Verificata sul database reale con utente usa e getta, poi eliminato con 0
-residui: la riga esattamente al tetto passa (la condizione è `>`, non `>=`),
-quella successiva è rifiutata con `PX004`, analisi e validazioni contano nella
-stessa somma, e sotto violazione simultanea arriva `PX002` — il limite
-specifico dell'utente — non `PX004`. `daily_cap_usd` è a `100.00`.
+**La migration `0011` (tetto globale di spesa) è applicata in produzione
+(`jaimkiagtolxbkftjapx`) dal 22 agosto 2026 — non riapplicarla.** Verificata sul
+database reale con utente usa e getta, 0 residui; il verbale sta nel commit e
+nella migration stessa. `daily_cap_usd` è a `100.00`.
 
 In particolare, ultimo stato noto ma **non riconfermato di recente**:
 
@@ -76,10 +59,6 @@ tetto e fermare il servizio per tutti — un'indisponibilità, non un costo.
 Restano da decidere le prime tre opzioni — dettaglio in `SECURITY_AUDIT.md`,
 voce A4:
 
-*(Nota: questo non è "vettore A" — quel nome, nei documenti sorgente, è già
-usato per il rate limit su `analyze-video`, chiuso con la migration `0008`.
-Sono due problemi diversi, entrambi originati dalla sezione 2 dell'audit; la
-prima versione di questo file li aveva confusi.)*
 1. CAPTCHA al signup
 2. Limite di registrazioni per IP o dominio email
 3. Verifica della carta anche sul piano gratuito
@@ -113,11 +92,9 @@ bloccanti":
    troppo spesso ora, non è più raro come progettato)
 4. L'handle canonico YouTube non ripassa dalla validazione dell'handle
 5. `is_private` fail-open quando l'actor non espone il campo — **resta
-   aperta**. Il branch `blocca-follow-profili-privati` blocca solo i profili
-   *noti* come privati (UI `d8cd615`, backend `3131654`);
-   `is_private=bool(privato)` (`apify_service.py:269`) è invariato dalla PR #7
-   e "l'actor non ne parla" vale ancora "pubblico". La guardia backend ha un
-   suo fail-open separato e deliberato: su cache miss lascia passare.
+   aperta**: `is_private=bool(privato)` (`apify_service.py:269`) è invariato
+   dalla PR #7, e "l'actor non ne parla" vale ancora "pubblico". Il branch
+   `blocca-follow-profili-privati` copre solo i profili *noti* come privati.
 
 ### A9, punto 2 — i link brevi (`vm.tiktok.com/...`) non sono risolti
 Deliberato, priorità bassa: risolverli con una `HEAD` metterebbe una chiamata
@@ -156,15 +133,3 @@ Corretto due volte dopo review sul codice reale: la prima nota (in
 (qui, prima versione) invertiva la struttura — attribuiva a Instagram una
 distinzione passthrough/fallback che appartiene solo a YouTube.
 
-### Plugin da installare (richiede l'utente)
-`/plugin install` per github, vercel, commit-commands, pr-review-toolkit
-@claude-plugins-official — non automatizzabile da una sessione.
-`security-guidance` risultava già abilitato. Da verificare se è stato fatto
-nel frattempo.
-
-## Prossimo passo consigliato (da SECURITY_AUDIT.md, da riconfermare)
-
-1. A13 — sbloccare la verifica di Docker
-2. A4 — decidere la risposta al Sybil, insieme al pricing
-3. Le cinque voci PR #7, quando c'è tempo
-4. Categoria B (Stripe) solo quando il billing sarà davvero in cantiere

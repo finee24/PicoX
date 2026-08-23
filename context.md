@@ -36,6 +36,20 @@ antenato di `main` (`git merge-base --is-ancestor`).
 la PR è mergiata (`ee547a2`, presente in `main`) e la migration `0005` è
 applicata dal 15 agosto. Resta solo accenderlo.
 
+**In pausa deliberata dal 22 agosto 2026 — non dimenticata, non bloccata.**
+Tecnicamente non manca nulla: i due prerequisiti restano confermati fatti e
+l'ultimo passo è un solo valore da cambiare. La decisione è di **non spendere
+niente** finché la data di lancio non è fissata — accendere il cron ha senso
+solo con un deploy Render attivo, e quel deploy richiede una carta. Quindi il
+cron resta spento per scelta economica, non per un impedimento tecnico.
+
+**Quando riprenderlo:** quando si decide il drop, non prima. A quel punto
+l'ordine è quello di `backend/app/cron_config.md`: configurare lo scheduler
+(passo 2, l'unico ancora da fare) e **solo allora** portare `CRON_ENABLED` a
+`true`. Accenderlo prima che qualcosa chiami l'endpoint non fa partire nulla —
+apre soltanto `POST /api/v1/cron/check-updates` a chiunque abbia
+`CRON_SECRET`.
+
 **La migration `0011` (tetto globale di spesa) è applicata** al progetto di
 produzione `jaimkiagtolxbkftjapx` dal **22 agosto 2026** — non riapplicarla.
 Verificata sul database reale con utente usa e getta, poi eliminato con 0
@@ -43,13 +57,6 @@ residui: la riga esattamente al tetto passa (la condizione è `>`, non `>=`),
 quella successiva è rifiutata con `PX004`, analisi e validazioni contano nella
 stessa somma, e sotto violazione simultanea arriva `PX002` — il limite
 specifico dell'utente — non `PX004`. `daily_cap_usd` è a `100.00`.
-
-Attenzione alla sequenza: il database ha il trigger **prima** che il codice che
-traduce `PX004` sia su `main` (PR #10 aperta, non mergiata). Finché è così, un
-`PX004` verrebbe tradotto dal backend nel ramo generico — `503
-database_unavailable` invece di `409 global_capacity_reached`. Senza
-conseguenze pratiche oggi, perché su Render non risulta alcun servizio
-deployato, ma va saputo.
 
 In particolare, ultimo stato noto ma **non riconfermato di recente**:
 

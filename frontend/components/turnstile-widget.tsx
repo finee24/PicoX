@@ -54,13 +54,26 @@ interface TurnstileWidgetProps {
  * e Supabase lo rifiuterebbe — con un errore che parla di captcha non valido
  * mentre all'utente il widget appare ancora spuntato di verde.
  *
- * NOTA SU COSA SI VEDE IN SVILUPPO. Con la sitekey di test di Cloudflare
- * (`1x00000000000000000000AA`) il widget **non disegna nulla**: nessun iframe,
- * nessuna casella da spuntare. Rende un contenitore vuoto e riempie subito
- * `input[name="cf-turnstile-response"]` con il token fittizio
- * `XXXX.DUMMY.TOKEN.XXXX`. Verificato nel browser: lo spazio è riservato ma
- * resta vuoto, ed è il comportamento atteso, non un difetto di montaggio. Con
- * una sitekey reale il widget si disegna.
+ * `reset()` è **verificato nel browser**, non solo per lettura: dopo un invio
+ * respinto da Supabase il widget si ri-renderizza invece di restare con il
+ * token già speso.
+ *
+ * COSA SI VEDE IN SVILUPPO, con la sitekey di test `1x00000000000000000000AA`.
+ * Sono due comportamenti diversi, entrambi osservati nel browser — non uno solo:
+ *
+ * - **Al primo render non disegna nulla.** Nessun iframe, nessuna casella:
+ *   rende un contenitore vuoto e riempie subito
+ *   `input[name="cf-turnstile-response"]` con il token fittizio
+ *   `XXXX.DUMMY.TOKEN.XXXX`. Lo spazio è riservato ma resta vuoto — è il
+ *   comportamento atteso, non un difetto di montaggio.
+ * - **Dopo un `reset()` si disegna**, transitoriamente: compare il box
+ *   Cloudflare con la scritta «Solo per test. Se visibile, segnalarlo al
+ *   proprietario del sito», e poi torna a riempirsi da solo.
+ *
+ * La prima versione di questa nota diceva che con questa chiave il widget non
+ * disegna **mai** nulla: era un assoluto tratto da una sola osservazione, e il
+ * re-render dopo il reset lo ha smentito. Con una sitekey reale il widget si
+ * disegna in entrambi i casi.
  */
 export function TurnstileWidget({ onToken, ref }: TurnstileWidgetProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);

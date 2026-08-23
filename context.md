@@ -85,9 +85,15 @@ prima versione di questo file li aveva confusi.)*
 3. Verifica della carta anche sul piano gratuito
 4. Tetto globale di spesa lato Apify/Gemini, indipendente dal numero di account
 
-Attenzione: configurare un SMTP proprio su Supabase Auth **rimuove** la
-protezione di fatto che c'è oggi (quota dell'SMTP condiviso), senza alcun
-segnale — vedi anche `claude.md`.
+**L'SMTP condiviso di Supabase permette solo 2 email/ora** (verificato il 23
+agosto 2026 in dashboard, Authentication → Rate Limits: campo fisso, non
+modificabile). È il vero vincolo di lancio, non un dettaglio dei test di oggi:
+configurare un SMTP proprio è un **prerequisito**, non un'ottimizzazione.
+
+E nello stesso momento in cui lo si fa, il CAPTCHA diventa l'**unica** barriera
+Sybil residua, perché configurare l'SMTP toglie l'altra protezione di fatto —
+quella quota — senza alcun segnale. Vedi A4 in `SECURITY_AUDIT.md`, e
+`CLAUDE.md`.
 
 ### A13 — `docker compose up` mai verificato end-to-end
 Bloccato da Docker non installato sulla macchina di sviluppo. Verifica

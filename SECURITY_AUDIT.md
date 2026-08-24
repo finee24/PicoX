@@ -292,7 +292,7 @@ piano. La variante che contava le righe di `insights` è stata scartata perché
 
 ## A4 🟠 Rischio Sybil — il tetto limita un account, non N account
 
-**Origine**: sezione 2 · **Stato**: **parzialmente mitigata** — opzione 4 implementata (migration `0011`); la scelta fra le opzioni 1-3 resta aperta
+**Origine**: sezione 2 · **Stato**: **parzialmente mitigata** — opzioni 1 (CAPTCHA) e 4 (tetto globale) implementate; restano da decidere la 2 e la 3
 
 Chi registra N account ottiene N × 30 creator attivi e il costo torna a scalare
 linearmente. L'unica barriera oggi è la verifica email di Supabase Auth, che alza
@@ -301,7 +301,9 @@ gratuiti e automatizzabili.
 
 **Pronta per un prompt diretto: NO.**
 
-- **Opzione 1** — CAPTCHA al signup.
+- ~~**Opzione 1**~~ — CAPTCHA al signup: **fatta**, Cloudflare Turnstile sul
+  form di registrazione, con il token passato a `supabase.auth.signUp` come
+  `options.captchaToken` e la verifica lato Supabase Auth.
 - **Opzione 2** — limite di registrazioni per IP o per dominio email.
 - **Opzione 3** — verifica della carta anche sul piano gratuito.
 - ~~**Opzione 4**~~ — tetto globale di spesa lato Apify/Gemini, come rete di
@@ -312,6 +314,35 @@ più economica da mettere. **Correzione**: questa voce diceva anche «non richie
 codice», e implementandola si è rivelato falso — servono un SQLSTATE nuovo
 (`PX004`), la sua traduzione, un'eccezione dedicata e il log strutturato. Poco
 codice, ma non zero.
+
+### Come è stata verificata l'opzione 1
+
+Due prove complementari, perché una sola non distingue «il captcha funziona» da
+«il captcha non c'è e passa tutto»:
+
+- **Sonda negativa** (23 agosto 2026): `POST /auth/v1/signup` senza alcun
+  `captcha_token` nel corpo →
+  `400 captcha_failed`, *«captcha protection: request disallowed (no
+  captcha_token found)»*. Nessuna riga creata. È la prova che il controllo è
+  **attivo**, e che rifiuta prima ancora di toccare la quota email.
+- **Signup positivo** (23-24 agosto 2026): registrazione reale dal form, con il
+  token prodotto dal widget. Riga vera in `auth.users`,
+  `confirmation_sent_at` valorizzato da GoTrue, e **email di conferma arrivata
+  davvero nella casella** — verificata sullo screenshot della posta, non solo
+  registrata come inviata da Supabase. Utente di prova poi eliminato, zero
+  residui su `auth.users`, `profiles` e `subscriptions`, controllati sia per
+  `user_id` sia per indirizzo.
+
+**In produzione servono sitekey e secret reali.** Quelle usate qui sono le
+chiavi di test di Cloudflare (`1x00000000000000000000AA` e la secret
+corrispondente): passano sempre e ovunque, quindi provano il percorso ma non
+fermano nessuno. Finché restano quelle, l'opzione 1 è implementata ma **non
+protegge**: la sostituzione è parte del rilascio, non un rifinimento successivo.
+
+Nota su cosa **non** copre: un captcha alza il costo della registrazione
+automatica, non la rende impossibile. Esistono servizi che li risolvono a
+pagamento, e restano fuori portata solo finché il bottino non li ripaga — che è
+esattamente il conto che il tetto globale dell'opzione 4 tiene chiuso.
 
 ### Cosa l'opzione 4 chiude, e cosa lascia aperto
 
@@ -345,10 +376,12 @@ blocco. Quattro fatti misurati prima di scrivere codice, che portano a saltarlo:
 2. **Il backend non vede mai il signup.** `auth-form.tsx:76` chiama
    `supabase.auth.signUp` direttamente. Non esiste un punto nel nostro codice in
    cui quella richiesta passi.
-3. **Il dato esiste già, nativamente.** `auth.audit_log_entries` ha una colonna
-   `ip_address` dedicata, popolata da GoTrue. Zero codice da scrivere. Oggi la
-   tabella è vuota su questo progetto — da verificare se sia una questione di
-   retention prima di contarci per un'analisi storica.
+3. **Il dato dovrebbe esistere nativamente, ma su questo progetto non c'è.**
+   `auth.audit_log_entries` ha una colonna `ip_address` dedicata, popolata da
+   GoTrue. **Verificato il 24 agosto 2026: la tabella ha 0 righe in assoluto**,
+   e non è retention — una registrazione avvenuta un minuto prima non compariva.
+   Semplicemente non viene popolata qui. Chi volesse contarci per un'analisi
+   storica deve prima capire perché, non darlo per acquisito.
 4. **Il signup è già limitato, ma non da un controllo di sicurezza.** Misurato:
    `HTTP 429 over_email_send_rate_limit`. È la quota di invio dell'**SMTP
    predefinito** di Supabase, non un rate limit sul signup — e **sparisce il
@@ -920,7 +953,7 @@ gestione abbonamento: Stripe fa tutte e tre. Il lavoro vero è in **A1**, **A3**
 | A1 | Auto-promozione `subscription_tier` via futuro GRANT | 7 (radice 1) | A | **fatto** (`0006`) | n/d | — |
 | A2 | Downgrade non retroattivo sui creator attivi | 7 (da 0004) | A | **fatto** (`0007`) | n/d | — |
 | A3 | Vettore A — nessun rate limit su `analyze-video` | 2 | A | **fatto** (`0008`) | n/d | — |
-| A4 | Rischio Sybil con più account | 2 | A | **parziale** — opzione 4 (tetto globale, `0011`) fatta: chiude la spesa, non la registrazione di massa. Opzioni 1-3 ancora da decidere; il segnale log-only resta **superfluo**, il dato esiste già in `auth.audit_log_entries` | **no** — 3 opzioni residue | da stimare |
+| A4 | Rischio Sybil con più account | 2 | A | **parziale** — opzioni 1 (CAPTCHA, Turnstile) e 4 (tetto globale, `0011`) fatte; restano da decidere la 2 e la 3. In produzione servono chiavi Turnstile reali, non quelle di test | **no** — 2 opzioni residue | da stimare |
 | A5 | Audit delle dipendenze | 3 | A | **fatto** — 0 in produzione, 1 solo dev fuori perimetro | n/d | — |
 | A6 | 500 fuori da `SafeRoute` senza header CORS | 5 | A | **fatto** | n/d | — |
 | A7 | Preflight CORS fuori dall'envelope | 5 | A | **chiusa per scelta**: non si corregge | n/d | — |

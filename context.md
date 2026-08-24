@@ -49,20 +49,19 @@ nella migration stessa. `daily_cap_usd` è a `100.00`.
 ## Task attivi
 
 ### A4 — rischio Sybil (più account)
-**Parzialmente mitigata dal 22 agosto 2026**: l'opzione 4 (tetto globale di
-spesa) è implementata dalla migration `0011` — `spend_limits` più il trigger
-`enforce_global_spend_cap` su `analysis_events` e `validation_events`, che
-solleva `PX004` → `409 global_capacity_reached`. Chiude la spesa, **non** la
-registrazione di massa: chi crea abbastanza account può ancora esaurire il
-tetto e fermare il servizio per tutti — un'indisponibilità, non un costo.
+**Due opzioni su quattro sono fatte** — dettaglio in `SECURITY_AUDIT.md`, A4:
 
-Restano da decidere le prime tre opzioni — dettaglio in `SECURITY_AUDIT.md`,
-voce A4:
-
-1. CAPTCHA al signup
-2. Limite di registrazioni per IP o dominio email
-3. Verifica della carta anche sul piano gratuito
-4. Tetto globale di spesa lato Apify/Gemini, indipendente dal numero di account
+1. ~~CAPTCHA al signup~~ — **fatta** (24 agosto 2026): Turnstile sul form, token
+   in `options.captchaToken`, verificato da Supabase Auth. Provato nei due versi
+   (senza token `400 captcha_failed`; con token, signup ed email reali).
+   **In produzione servono chiavi reali**: ora ci sono quelle di test, che
+   passano sempre — implementata non è ancora protetta.
+2. Limite di registrazioni per IP o dominio email — aperta
+3. Verifica della carta anche sul piano gratuito — aperta
+4. ~~Tetto globale di spesa~~ — **fatta** (22 agosto): migration `0011`,
+   `PX004` → `409 global_capacity_reached`. Chiude la spesa, **non** la
+   registrazione di massa: chi crea abbastanza account può esaurire il tetto e
+   fermare il servizio — un'indisponibilità, non un costo.
 
 **L'SMTP condiviso di Supabase permette solo 2 email/ora** (verificato il 23
 agosto 2026 in dashboard, Authentication → Rate Limits: campo fisso, non
@@ -83,13 +82,11 @@ che rende vero `MAX_VIDEO_DURATION_SECONDS` in produzione. ~10 minuti una
 volta installato Docker.
 
 ### Cinque voci aperte per scelta dalla review di sicurezza della PR #7
-Nessuna bloccante, nessuna richiede azione immediata — dettaglio completo in
-`docs/archive/PROGRESS-2026-08-15.md`, sezione "APERTE — cinque voci non
-bloccanti":
+Nessuna bloccante — dettaglio in `docs/archive/PROGRESS-2026-08-15.md`, sezione
+"APERTE — cinque voci non bloccanti":
 1. `creator_validations.checked_at` — oracolo cross-tenant a basso impatto
-2. Il passthrough del cron non riverifica l'host prima di dare l'URL a Gemini
-3. Il log di audit delle query non scopate ha perso valore di segnale (scatta
-   troppo spesso ora, non è più raro come progettato)
+2. Il passthrough del cron non riverifica l'host prima di darlo a Gemini
+3. Il log di audit delle query non scopate ha perso valore di segnale
 4. L'handle canonico YouTube non ripassa dalla validazione dell'handle
 5. `is_private` fail-open quando l'actor non espone il campo — **resta
    aperta**: `is_private=bool(privato)` (`apify_service.py:269`) è invariato

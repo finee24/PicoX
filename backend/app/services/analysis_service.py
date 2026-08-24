@@ -40,7 +40,11 @@ from app.services.analysis_lock import analysis_lock
 from app.services.apify_service import ApifyService
 from app.services.content_scraper import scrape_content
 from app.services.gemini_service import GeminiService
-from app.services.media_service import canonical_cache_key, download_to_temp
+from app.services.media_service import (
+    assert_public_target,
+    canonical_cache_key,
+    download_to_temp,
+)
 from app.services.prompt_loader import AnalysisContext
 from app.services.supabase_service import db_errors, scoped_table, service_table
 from app.services.youtube_service import YouTubeService
@@ -436,6 +440,22 @@ async def run_analysis(
     contesto = AnalysisContext.da_scraping(scraped) if scraped is not None else None
 
     if scraped is not None and scraped.youtube_url:
+        # La stessa difesa SSRF del percorso di download, applicata anche qui.
+        #
+        # `assert_public_target` viveva solo dentro `download_to_temp`, cioè nel
+        # ramo che i byte li scarica. Il passthrough quel ramo lo salta per
+        # definizione — a scaricare è Google — e con esso saltava il controllo,
+        # lasciando che un URL puntato alla rete interna arrivasse a Gemini senza
+        # che nessuno lo guardasse. Che l'URL venga dallo scraper e non
+        # dall'utente non basta a fidarsi: lo scraper restituisce ciò che il
+        # provider gli dice, e un redirect è sufficiente a spostare la
+        # destinazione.
+        #
+        # Solleva `PicoxValidationError` (422) o `ExternalServiceError` (503)
+        # esattamente come sull'altro percorso, quindi il chiamante non ha un
+        # caso nuovo da gestire.
+        await assert_public_target(scraped.youtube_url)
+
         logger.info(
             "Analisi avviata in passthrough su %s, modalità %s",
             scraped.platform,

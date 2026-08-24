@@ -229,9 +229,16 @@ async def _leggi_cache(
     target: TargetValidazione, settings: Settings
 ) -> CreatorValidationResponse | None:
     """Riga di cache ancora fresca, `None` se assente o scaduta."""
+    # `di_routine`: questa lettura scatta a **ogni** richiesta di validazione,
+    # cache hit compresi. Lasciarla a INFO rendeva il log delle query non
+    # scopate un rumore di fondo, e un segnale che scatta sempre non segnala
+    # più niente. La scrittura qui sotto resta a INFO di proposito: avviene solo
+    # quando un provider è stato davvero pagato, quindi è rara e vale la pena
+    # vederla.
     tabella = await unscoped_service_table(
         _TABELLA_CACHE,
         reason="cache condivisa delle validazioni: la chiave non ha un utente",
+        di_routine=True,
     )
 
     async with db_errors("lettura cache validazioni"):
@@ -319,6 +326,56 @@ async def _scrivi_cache(
 # =============================================================================
 # Quota
 # =============================================================================
+
+
+def _arrotonda_alla_finestra(momento: datetime, ttl_ore: int) -> datetime:
+    """Tronca `momento` all'inizio della finestra di TTL che lo contiene.
+
+    ## Perché l'istante esatto non può uscire da qui
+
+    `creator_validations` è una cache **condivisa fra tutti gli utenti**: è ciò
+    che le dà valore, perché due utenti interessati allo stesso creator pagano il
+    provider una volta sola. Ma significa che su un cache hit il `checked_at`
+    restituito è l'istante in cui **qualcun altro** ha validato quell'handle.
+
+    Con l'istante al secondo, chiunque può interrogare un handle e leggere quando
+    è stato verificato l'ultima volta: un oracolo su cosa stanno guardando gli
+    altri utenti di Picox. Sul singolo handle dice poco; su una lista di handle
+    interrogata a intervalli regolari disegna l'attività altrui.
+
+    Arrotondare alla finestra del TTL toglie quella risoluzione lasciando intatto
+    ciò che serve davvero al client — «quanto è vecchio questo dato» — perché
+    oltre la finestra il dato non esiste più comunque: viene rivalidato.
+
+    Il valore **persistito** resta esatto: qui si arrotonda solo ciò che esce
+    verso il client. La scadenza della cache si calcola sulla colonna
+    `checked_at` della riga, non su questo campo, e falsarla sposterebbe il TTL
+    fino a 24 ore.
+    """
+    secondi_finestra = max(ttl_ore, 1) * 3600
+    epoca = datetime(1970, 1, 1, tzinfo=UTC)
+    trascorsi = int((momento - epoca).total_seconds())
+    return epoca + timedelta(seconds=trascorsi - (trascorsi % secondi_finestra))
+
+
+def _senza_istante_esatto(
+    esito: CreatorValidationResponse, settings: Settings
+) -> CreatorValidationResponse:
+    """La risposta come la vede il client, con `checked_at` arrotondato.
+
+    Si applica a **entrambi** i rami, cache hit e validazione fresca, e non solo
+    al primo. Arrotondare solo i cache hit lascerebbe in piedi lo stesso oracolo
+    in forma più sottile: un valore al secondo direbbe «questa l'ho pagata io»,
+    uno arrotondato «l'aveva già validata qualcun altro» — cioè esattamente il
+    fatto che si vuole nascondere.
+    """
+    return esito.model_copy(
+        update={
+            "checked_at": _arrotonda_alla_finestra(
+                esito.checked_at, settings.creator_validation_ttl_hours
+            )
+        }
+    )
 
 
 async def _consuma_quota(user_id: str, target: TargetValidazione) -> None:
@@ -446,7 +503,7 @@ async def validate_creator(
         logger.info(
             "Cache hit sulla validazione di %s/%s", target.platform, target.identifier
         )
-        return in_cache
+        return _senza_istante_esatto(in_cache, settings)
 
     await _consuma_quota(user_id, target)
 
@@ -457,5 +514,8 @@ async def validate_creator(
     # seconda riga di cache per lo stesso canale — non un errore: chi arriva
     # dall'alias trova comunque la risposta giusta, che porta con sé
     # l'identificatore canonico.
+    # L'arrotondamento avviene **dopo** la scrittura, non prima: in cache va
+    # l'istante esatto, perché è su quello che si calcola la scadenza del TTL.
+    # Invertire l'ordine sposterebbe la scadenza fino a 24 ore.
     await _scrivi_cache(target, esito)
-    return esito
+    return _senza_istante_esatto(esito, settings)

@@ -16,6 +16,7 @@ proprio quelli da cui dipende la tenuta dell'API.
 from __future__ import annotations
 
 import os
+import socket
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -365,6 +366,32 @@ def downloads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     monkeypatch.setattr(analysis_module, "download_to_temp", fake_download)
     return requested
+
+
+@pytest.fixture(autouse=True)
+def dns(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Neutralizza la risoluzione DNS e registra gli host interrogati.
+
+    Stessa ragione della fixture `downloads` qui sopra, e stesso `autouse=True`.
+    Da quando `assert_public_target` protegge anche il ramo **passthrough** — non
+    solo il download — un test che entra in quel ramo risolve davvero l'host su
+    Internet: diventa lento, dipendente dalla rete, e fallisce per un motivo che
+    non ha nulla a che vedere con ciò che voleva verificare. Prima di questa
+    fixture i due test sul passthrough risolvevano `youtube.com` per davvero.
+
+    L'indirizzo restituito è pubblico, quindi il controllo SSRF passa: qui non è
+    lui l'oggetto della verifica. Chi vuole esercitarlo lo sostituisce nel corpo
+    del test — `monkeypatch` applicato lì ha comunque la precedenza, ed è ciò che
+    fa `test_ssrf.py`.
+    """
+    interrogati: list[str] = []
+
+    def falso_getaddrinfo(host: str, *args: Any, **kwargs: Any) -> list[Any]:
+        interrogati.append(host)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", falso_getaddrinfo)
+    return interrogati
 
 
 # =============================================================================

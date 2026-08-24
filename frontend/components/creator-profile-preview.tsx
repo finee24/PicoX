@@ -4,7 +4,11 @@ import { AlertTriangle, BadgeCheck, Loader2, Lock, UserX } from "lucide-react";
 
 import { CreatorAvatar } from "@/components/creator-avatar";
 import { formatFollowers } from "@/lib/format";
-import { PLATFORM_LABELS, type CreatorValidation } from "@/lib/types";
+import {
+  PLATFORM_FOLLOWER_NOUN,
+  PLATFORM_LABELS,
+  type CreatorValidation,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -89,7 +93,7 @@ export function CreatorProfilePreview({
         <div className="shrink-0 text-right">
           <p className="text-sm font-medium">{formatFollowers(profile.follower_count)}</p>
           <p className="text-muted-foreground text-xs">
-            {platform === "youtube_shorts" ? "iscritti" : "follower"}
+            {PLATFORM_FOLLOWER_NOUN[platform]}
           </p>
         </div>
       </div>

@@ -40,7 +40,9 @@ import {
   updateCreator,
   validateCreator,
 } from "@/lib/api";
+import { creatorKeys, insightKeys } from "@/lib/query-keys";
 import {
+  ANALYSIS_MODE_OPTIONS,
   PLATFORM_LABELS,
   type AnalysisMode,
   type Creator,
@@ -51,13 +53,7 @@ import {
 
 const PLATFORMS: Platform[] = ["instagram", "tiktok", "youtube_shorts"];
 
-const MODES: { value: AnalysisMode; label: string }[] = [
-  { value: "BOTH", label: "Completa" },
-  { value: "INFO", label: "Solo contenuto" },
-  { value: "STYLE", label: "Solo stile" },
-];
 
-const CREATORS_KEY = ["creators"] as const;
 
 function AddCreatorForm() {
   const queryClient = useQueryClient();
@@ -73,6 +69,26 @@ function AddCreatorForm() {
   // superate dai fatti: due blur ravvicinati possono tornare in ordine inverso,
   // e senza questo controllo la card mostrerebbe il profilo di ciò che c'era
   // scritto prima.
+  //
+  // Lo stesso guardiano esiste in `hooks/use-creator-preview.ts`, che verifica
+  // lo stesso endpoint. **La somiglianza è superficiale e la separazione è
+  // deliberata**: i due divergono su cosa fanno dell'esito, ed è una differenza
+  // di prodotto, non di implementazione.
+  //
+  //   * qui l'esito grezzo va alla card, che sa mostrare da sé "privato" e "non
+  //     trovato"; là diventa una stringa d'avviso e la card sparisce;
+  //   * qui blocca **solo** l'account inesistente — un profilo privato si può
+  //     comunque aggiungere alla watchlist, magari tornerà pubblico; là blocca
+  //     anche il privato, perché un video di un profilo privato non è
+  //     scaricabile e l'analisi fallirebbe *dopo* aver pagato;
+  //   * qui un 422 diventa un errore di campo; là viene ingoiato, perché su un
+  //     link di un Reel l'autore non è ricavabile e non saperlo non è un motivo
+  //     per impedire un'analisi che funziona.
+  //
+  // Unificarli richiederebbe di scegliere una di queste semantiche, cioè di
+  // cambiare il comportamento di una delle due pagine. Se un domani servisse
+  // davvero, la cosa da estrarre è il solo guardiano "vince l'ultima richiesta",
+  // non la macchina a stati.
   const richiestaCorrente = useRef("");
 
   const verificaAccount = useMutation({
@@ -150,7 +166,7 @@ function AddCreatorForm() {
       setValidation(null);
       setValidationFailure(null);
       richiestaCorrente.current = "";
-      void queryClient.invalidateQueries({ queryKey: CREATORS_KEY });
+      void queryClient.invalidateQueries({ queryKey: creatorKeys.all });
       toast.success("Creator aggiunto", {
         description: `@${creator.username} è ora monitorato su ${PLATFORM_LABELS[creator.platform]}.`,
       });
@@ -264,7 +280,7 @@ function AddCreatorForm() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {MODES.map((option) => (
+                  {ANALYSIS_MODE_OPTIONS.map((option) => (
                     <SelectItem key={option.value} value={option.value}>
                       {option.label}
                     </SelectItem>
@@ -326,10 +342,10 @@ function CreatorRow({ creator }: { creator: Creator }) {
     // Aggiornamento ottimistico: uno switch che aspetta il round-trip prima di
     // muoversi sembra rotto.
     onMutate: async (isActive) => {
-      await queryClient.cancelQueries({ queryKey: CREATORS_KEY });
-      const previous = queryClient.getQueryData<CreatorListResponse>(CREATORS_KEY);
+      await queryClient.cancelQueries({ queryKey: creatorKeys.all });
+      const previous = queryClient.getQueryData<CreatorListResponse>(creatorKeys.all);
 
-      queryClient.setQueryData<CreatorListResponse>(CREATORS_KEY, (old) =>
+      queryClient.setQueryData<CreatorListResponse>(creatorKeys.all, (old) =>
         old
           ? {
               ...old,
@@ -344,21 +360,21 @@ function CreatorRow({ creator }: { creator: Creator }) {
     },
     onError: (error, _isActive, context) => {
       if (context?.previous) {
-        queryClient.setQueryData(CREATORS_KEY, context.previous);
+        queryClient.setQueryData(creatorKeys.all, context.previous);
       }
       toast.error("Non riesco ad aggiornare il creator", {
         description: toUserMessage(error),
       });
     },
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: CREATORS_KEY });
+      void queryClient.invalidateQueries({ queryKey: creatorKeys.all });
     },
   });
 
   const remove = useMutation({
     mutationFn: () => deleteCreator(creator.id),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: CREATORS_KEY });
+      void queryClient.invalidateQueries({ queryKey: creatorKeys.all });
       // Anche gli insight: `insights.creator_id` è `ON DELETE SET NULL`, quindi
       // la cancellazione di un creator cambia righe che stanno nell'altra
       // cache. Senza questa riga gli insight già scaricati conservavano il
@@ -367,7 +383,7 @@ function CreatorRow({ creator }: { creator: Creator }) {
       // La chiave è il prefisso `["insights"]`: le query reali sono
       // `["insights", { search, mode }]`, e invalidare il prefisso le copre
       // tutte, come già fa `analyze-input.tsx`.
-      void queryClient.invalidateQueries({ queryKey: ["insights"] });
+      void queryClient.invalidateQueries({ queryKey: insightKeys.all });
       toast.success("Creator rimosso", {
         description: "Gli insight già generati restano in archivio.",
       });
@@ -380,7 +396,28 @@ function CreatorRow({ creator }: { creator: Creator }) {
     },
   });
 
-  const modeLabel = MODES.find((m) => m.value === creator.analysis_mode)?.label;
+  // Stessa API di `toggle` qui sopra, e ora anche stesso meccanismo. Era
+  // scritta come catena `.then().catch()`: l'unica mutazione del frontend a non
+  // passare da `useMutation`, e quindi l'unica a **non** attraversare la
+  // `MutationCache` di `app/providers.tsx`, dove un 401 innesca il logout
+  // centralizzato. Su questa singola azione una sessione scaduta mostrava un
+  // toast e lasciava l'utente in una pagina che non poteva più funzionare.
+  //
+  // Niente aggiornamento ottimistico, a differenza di `toggle`: qui non ce
+  // n'era, e aggiungerlo avrebbe cambiato ciò che si vede.
+  const changeMode = useMutation({
+    mutationFn: (mode: AnalysisMode) => updateCreator(creator.id, { analysis_mode: mode }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: creatorKeys.all });
+    },
+    onError: (error) => {
+      toast.error("Non riesco ad aggiornare la modalità", {
+        description: toUserMessage(error),
+      });
+    },
+  });
+
+  const modeLabel = ANALYSIS_MODE_OPTIONS.find((m) => m.value === creator.analysis_mode)?.label;
 
   return (
     <TableRow>
@@ -391,21 +428,13 @@ function CreatorRow({ creator }: { creator: Creator }) {
       <TableCell>
         <Select
           value={creator.analysis_mode}
-          onValueChange={(next) =>
-            updateCreator(creator.id, { analysis_mode: next as AnalysisMode })
-              .then(() => queryClient.invalidateQueries({ queryKey: CREATORS_KEY }))
-              .catch((error: unknown) =>
-                toast.error("Non riesco ad aggiornare la modalità", {
-                  description: toUserMessage(error),
-                }),
-              )
-          }
+          onValueChange={(next) => changeMode.mutate(next as AnalysisMode)}
         >
           <SelectTrigger size="sm" className="w-36" aria-label={`Modalità per @${creator.username}`}>
             <SelectValue>{modeLabel}</SelectValue>
           </SelectTrigger>
           <SelectContent>
-            {MODES.map((option) => (
+            {ANALYSIS_MODE_OPTIONS.map((option) => (
               <SelectItem key={option.value} value={option.value}>
                 {option.label}
               </SelectItem>
@@ -461,7 +490,7 @@ function CreatorRow({ creator }: { creator: Creator }) {
 
 export function CreatorsView() {
   const creatorsQuery = useQuery({
-    queryKey: CREATORS_KEY,
+    queryKey: creatorKeys.all,
     queryFn: ({ signal }) => fetchCreators(signal),
   });
 

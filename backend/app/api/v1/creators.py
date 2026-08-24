@@ -31,7 +31,7 @@ from app.schemas.creators import (
 )
 from app.services.apify_service import ApifyService, get_apify_service
 from app.services.creator_validation import validate_creator
-from app.services.supabase_service import db_errors, scoped_client
+from app.services.supabase_service import db_errors, scoped_table
 from app.services.youtube_service import YouTubeService, get_youtube_service
 
 logger = logging.getLogger(__name__)
@@ -67,16 +67,20 @@ async def create_creator(
     database: affidarsi a un SELECT preventivo lascerebbe aperta la finestra fra
     controllo e insert. La violazione viene tradotta in 409.
     """
+    # `user_id` non compare: lo inietta `ScopedTable.insert`, che ignora di
+    # proposito qualunque proprietario passato nel payload.
     record: dict[str, Any] = {
-        "user_id": user.id,
         "username": payload.username,
         "platform": payload.platform,
         "analysis_mode": payload.analysis_mode,
         "is_active": payload.is_active,
     }
 
-    async with db_errors("insert creator"), scoped_client(user.access_token, settings) as db:
-        result = await db.table("creators").insert(record).execute()
+    async with (
+        db_errors("insert creator"),
+        scoped_table("creators", user.id, user.access_token, settings) as creators,
+    ):
+        result = await creators.insert(record).execute()
 
     if not result.data:
         # Con il RLS attivo un insert che non torna nulla significa che la policy
@@ -145,14 +149,11 @@ async def list_creators(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> CreatorListResponse:
     """Tutti i creator dell'utente, dal più recente."""
-    async with db_errors("select creators"), scoped_client(user.access_token, settings) as db:
-        result = await (
-            db.table("creators")
-            .select("*")
-            .eq("user_id", user.id)
-            .order("created_at", desc=True)
-            .execute()
-        )
+    async with (
+        db_errors("select creators"),
+        scoped_table("creators", user.id, user.access_token, settings) as creators,
+    ):
+        result = await creators.select("*").order("created_at", desc=True).execute()
 
     items = [CreatorResponse.model_validate(row) for row in result.data or []]
     return CreatorListResponse(items=items, total=len(items))
@@ -181,16 +182,14 @@ async def update_creator(
     """
     changes = payload.changed_fields()
 
-    async with db_errors("update creator"), scoped_client(user.access_token, settings) as db:
-        result = await (
-            db.table("creators")
-            .update(changes)
-            # La PK da sola non basta come filtro: `user_id` è ciò che rende
-            # impossibile toccare la riga di un altro tenant.
-            .eq("id", str(creator_id))
-            .eq("user_id", user.id)
-            .execute()
-        )
+    # Il filtro su `user_id` non è scritto qui: lo mette `ScopedTable.update`.
+    # La PK da sola non basterebbe — è il proprietario a rendere impossibile
+    # toccare la riga di un altro tenant.
+    async with (
+        db_errors("update creator"),
+        scoped_table("creators", user.id, user.access_token, settings) as creators,
+    ):
+        result = await creators.update(changes).eq("id", str(creator_id)).execute()
 
     if not result.data:
         raise NotFoundError("Creator non trovato.")
@@ -219,14 +218,11 @@ async def delete_creator(
     `ON DELETE SET NULL`, perché l'analisi è già stata pagata in token e resta
     di valore anche senza il creator di provenienza.
     """
-    async with db_errors("delete creator"), scoped_client(user.access_token, settings) as db:
-        result = await (
-            db.table("creators")
-            .delete()
-            .eq("id", str(creator_id))
-            .eq("user_id", user.id)
-            .execute()
-        )
+    async with (
+        db_errors("delete creator"),
+        scoped_table("creators", user.id, user.access_token, settings) as creators,
+    ):
+        result = await creators.delete().eq("id", str(creator_id)).execute()
 
     if not result.data:
         raise NotFoundError("Creator non trovato.")

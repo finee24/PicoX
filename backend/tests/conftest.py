@@ -361,9 +361,9 @@ def downloads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
             duration_seconds=known_duration_seconds or 42.0,
         )
 
-    import app.api.v1.analyze as analyze_module
+    import app.services.analysis_service as analysis_module
 
-    monkeypatch.setattr(analyze_module, "download_to_temp", fake_download)
+    monkeypatch.setattr(analysis_module, "download_to_temp", fake_download)
     return requested
 
 

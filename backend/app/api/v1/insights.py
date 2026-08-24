@@ -17,7 +17,7 @@ from app.core.config import Settings, get_settings
 from app.core.security import CurrentUser
 from app.middleware.error_handler import SafeRoute
 from app.schemas.insights import InsightFilterMode, InsightListResponse, InsightResponse
-from app.services.supabase_service import db_errors, scoped_client
+from app.services.supabase_service import db_errors, scoped_table
 
 logger = logging.getLogger(__name__)
 
@@ -78,12 +78,11 @@ async def list_insights(
     """
     offset = (page - 1) * limit
 
-    async with db_errors("select insights"), scoped_client(user.access_token, settings) as db:
-        query = (
-            db.table("insights")
-            .select("*", count=CountMethod.exact)
-            .eq("user_id", user.id)
-        )
+    async with (
+        db_errors("select insights"),
+        scoped_table("insights", user.id, user.access_token, settings) as insights,
+    ):
+        query = insights.select("*", count=CountMethod.exact)
 
         if creator_id is not None:
             query = query.eq("creator_id", str(creator_id))

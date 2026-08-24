@@ -33,6 +33,7 @@ import httpx
 
 from app.core.config import Settings, get_settings
 from app.core.exceptions import YouTubeError
+from app.services.provider_parsing import come_datetime, contatore
 
 logger = logging.getLogger(__name__)
 
@@ -224,29 +225,6 @@ def _best_thumbnail(snippet: dict[str, Any]) -> str | None:
     return None
 
 
-def _contatore(raw: Any) -> int | None:
-    """Un contatore della Data API, che li serializza **come stringhe**.
-
-    `None` quando il campo manca: su un video con i like nascosti l'API omette
-    `likeCount`, e zero sarebbe un'affermazione che non abbiamo.
-    """
-    if isinstance(raw, str) and raw.isdigit():
-        return int(raw)
-    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
-        return raw
-    return None
-
-
-def _come_datetime(raw: Any) -> datetime | None:
-    """`publishedAt` (RFC 3339 con la `Z`) come datetime."""
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
 def _subscriber_count(statistics: dict[str, Any]) -> int:
     """Iscritti, `0` se il canale li nasconde.
 
@@ -256,7 +234,7 @@ def _subscriber_count(statistics: dict[str, Any]) -> int:
     i follower nascosti su Instagram: la preview non ha modo di distinguerli e
     non deve far finta di poterlo fare.
     """
-    return _contatore(statistics.get("subscriberCount")) or 0
+    return contatore(statistics.get("subscriberCount")) or 0
 
 
 class YouTubeService:
@@ -376,10 +354,10 @@ class YouTubeService:
             title=str(snippet.get("title") or ""),
             channel_title=str(snippet.get("channelTitle") or ""),
             duration_seconds=_durata_iso_in_secondi(content.get("duration")),
-            published_at=_come_datetime(snippet.get("publishedAt")),
-            view_count=_contatore(statistics.get("viewCount")),
-            like_count=_contatore(statistics.get("likeCount")),
-            comment_count=_contatore(statistics.get("commentCount")),
+            published_at=come_datetime(snippet.get("publishedAt")),
+            view_count=contatore(statistics.get("viewCount")),
+            like_count=contatore(statistics.get("likeCount")),
+            comment_count=contatore(statistics.get("commentCount")),
             thumbnail_url=_best_thumbnail(snippet),
         )
 

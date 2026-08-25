@@ -41,10 +41,18 @@ da fare), **poi** `CRON_ENABLED=true`.
 Accenderlo prima non avvia nulla: apre soltanto
 `POST /api/v1/cron/check-updates` a chi ha `CRON_SECRET`.
 
+**Il tetto globale di spesa (`0011`) non copre il cron**: scrive fuori da
+`analysis_events` per scelta della `0008` — `conta_quota=False` (`cron.py:198`)
+e i trigger del tetto sono `before insert` su quella tabella (`0011:281-291`),
+quindi nessuna riga, nessun controllo. Prima di accendere serve un tetto
+dedicato al cron o l'unione dei due budget: altrimenti gira senza alcun limite
+globale sopra. E il **primo giro è il più caro**, non un costo graduale: il
+dedup non trova nulla di già analizzato e accoda fino a 10 analisi per creator
+attivo (`apify_results_per_creator`).
+
 **La migration `0011` (tetto globale di spesa) è applicata in produzione
-(`jaimkiagtolxbkftjapx`) dal 22 agosto 2026 — non riapplicarla.** Verificata sul
-database reale con utente usa e getta, 0 residui; il verbale sta nel commit e
-nella migration stessa. `daily_cap_usd` è a `100.00`.
+(`jaimkiagtolxbkftjapx`) dal 22 agosto 2026 — non riapplicarla.** Il verbale
+della verifica sta nel commit e nella migration. `daily_cap_usd` è a `100.00`.
 
 ## Task attivi
 
@@ -100,33 +108,23 @@ archivio. Restano:
 Deliberato, priorità bassa: risolverli con una `HEAD` metterebbe una chiamata
 di rete nel percorso della cache key. La via migliore — ri-chiavare dopo lo
 scraping, che già risolve il link — tocca `perform_analysis` e il lock: è un
-intervento a sé, non ancora pianificato.
+intervento a sé.
 
 ### Confine del giorno delle quote — UTC per configurazione, non per codice
-Deliberato, priorità bassa. I tre trigger di quota (`0008`, `0010`, `0011`)
-usano `date_trunc('day', now())` per il confine del giorno — in pratica UTC
-perché è il default della sessione Supabase, non perché il codice lo
-garantisca. Allinearli esplicitamente a UTC è un lavoro a sé, va fatto ai tre
-insieme se mai lo si fa: cambiarne uno solo creerebbe due "giorni" diversi
-nello stesso database.
+Deliberato, priorità bassa. I tre trigger di quota (`0008`, `0010`, `0011`) usano
+`date_trunc('day', now())`: UTC perché è il default della sessione Supabase, non
+perché il codice lo garantisca. Se mai li si allinea esplicitamente vanno fatti
+tutti e tre insieme — cambiarne uno solo creerebbe due "giorni" nello stesso
+database.
 
 ### Il parametro Apify mancante: Instagram mai verificato, YouTube sul fallback
 
-`_single_video_input` passa `shouldDownloadVideos: true` solo per TikTok
-(dove serviva: senza, l'actor non restituiva alcun URL scaricabile).
-
-**Instagram passa sempre da lì** — `ApifyContentScraper` → `resolve_video`
-→ `_single_video_input` (`content_scraper.py:198-199`): non ha un
-passthrough, è l'unico percorso che ha. Non è mai stato controllato per lo
-stesso problema, e riguarda quindi **tutto** il suo utilizzo, non un
-sottoinsieme.
-
-**YouTube passa di norma in passthrough** (`YouTubeContentScraper`,
-`content_scraper.py:150-174`) e in quel caso non ha bisogno di alcun URL
-scaricabile — non è a rischio lì. Ma ha anche un **ramo di fallback ad
-Apify** quando la durata non è verificabile via passthrough
-(`content_scraper.py:177-186`): è quel ramo, non tutto YouTube, a non
-essere mai stato controllato per lo stesso problema di TikTok.
+`_single_video_input` passa `shouldDownloadVideos: true` solo per TikTok (dove
+serviva: senza, l'actor non restituiva alcun URL scaricabile). Mai controllato
+per lo stesso problema: **tutto** Instagram, che di lì passa sempre e non ha
+passthrough (`content_scraper.py:198-199`), e il **solo ramo di fallback ad
+Apify** di YouTube (`:177-186`) — non tutto YouTube, che di norma va in
+passthrough (`:150-174`), dove nessun URL scaricabile gli serve.
 
 Già corretta due volte sul codice reale: non riattribuire a Instagram la
 distinzione passthrough/fallback, che è solo di YouTube.

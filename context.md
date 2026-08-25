@@ -62,15 +62,13 @@ nella migration stessa. `daily_cap_usd` è a `100.00`.
    registrazione di massa: chi crea abbastanza account può esaurire il tetto e
    fermare il servizio — un'indisponibilità, non un costo.
 
-**L'SMTP condiviso di Supabase permette solo 2 email/ora** (verificato il 23
-agosto 2026 in dashboard, Authentication → Rate Limits: campo fisso, non
-modificabile). È il vero vincolo di lancio, non un dettaglio dei test di oggi:
+**L'SMTP condiviso di Supabase permette solo 2 email/ora** (campo fisso in
+dashboard, non modificabile). È il vero vincolo di lancio, non un dettaglio:
 configurare un SMTP proprio è un **prerequisito**, non un'ottimizzazione.
 
 E nello stesso momento in cui lo si fa, il CAPTCHA diventa l'**unica** barriera
 Sybil residua, perché configurare l'SMTP toglie l'altra protezione di fatto —
-quella quota — senza alcun segnale. Vedi A4 in `SECURITY_AUDIT.md`, e
-`CLAUDE.md`.
+quella quota — senza alcun segnale.
 
 ### A13 — `docker compose up` mai verificato end-to-end
 Bloccato da Docker non installato sulla macchina di sviluppo. Verifica
@@ -92,10 +90,11 @@ archivio. Restano:
    **PR #13 mergiata** (25 agosto 2026, `5878c75`): copre solo il caso *già
    noto come privato* — blocco UI e guardia su `POST /creators` che legge la
    cache. Il fail-open qui sopra **resta aperto**.
-2. **L'handle canonico YouTube** non ripassa dalla validazione dell'handle.
-   Diagnosi del 25 agosto 2026, fix **non deciso**: `customUrl` diventa
-   `normalized_identifier` con solo `.lower()` (`creator_validation.py:473`),
-   ma la cache resta chiavata sulla forma *cercata* (`:317`).
+2. **L'handle canonico YouTube** — `customUrl` ora passa da `clean_username`,
+   con ripiego sulla forma *cercata* quando non valida (PR #14). Resta aperta
+   solo la **decisione 1**: sotto quale chiave scrivere la riga di cache
+   (`creator_validation.py:317`). Ridisegno a sé — finché non si fa, due forme
+   dello stesso canale sono due righe e due unità di quota.
 
 ### A9, punto 2 — i link brevi (`vm.tiktok.com/...`) non sono risolti
 Deliberato, priorità bassa: risolverli con una `HEAD` metterebbe una chiamata

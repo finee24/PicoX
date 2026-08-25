@@ -672,6 +672,158 @@ def test_un_avatar_con_schema_inatteso_viene_scartato(
 
 
 # =============================================================================
+# 6. La guardia su POST /creators: cio' che la cache sa gia'
+# =============================================================================
+#
+# L'interfaccia impedisce gia' di seguire un profilo privato. Questa e' la stessa
+# regola per chi chiama l'API direttamente, e ha un vincolo che ne definisce la
+# forma: **non deve poter costare denaro**. Legge la cache e nient'altro, quindi
+# su cio' che la cache non sa lascia passare.
+#
+# I test qui sotto valgono quanto quelli che bloccano: una guardia che si mette
+# a validare da se' trasformerebbe un endpoint gratuito in uno a consumo, e
+# renderebbe impossibile aggiungere creator ogni volta che Apify e' giu'.
+
+
+def _aggiungi(
+    client: TestClient, headers: dict[str, str], username: str, piattaforma: str = "instagram"
+):
+    return client.post(
+        "/api/v1/creators",
+        headers=headers,
+        json={"username": username, "platform": piattaforma},
+    )
+
+
+def _valida_profilo_privato(
+    client: TestClient, headers: dict[str, str], apify: FakeApify, handle: str = "creator"
+) -> None:
+    """Riempie la cache con un esito `esiste ma non e' pubblico`."""
+    apify.profile = ScrapedProfile(username=handle, is_private=True)
+    risposta = _valida(client, headers, f"instagram.com/{handle}")
+    assert risposta.json()["is_public"] is False, "la cache non contiene un profilo privato"
+
+
+def test_un_profilo_noto_come_privato_non_si_puo_aggiungere(
+    client: TestClient, auth_headers: dict[str, str], apify: FakeApify, store: FakeStore
+) -> None:
+    _valida_profilo_privato(client, auth_headers, apify)
+
+    risposta = _aggiungi(client, auth_headers, "creator")
+
+    assert risposta.status_code == 422, risposta.text
+    assert risposta.json()["error"]["code"] == "creator_is_private"
+    assert store.rows("creators") == [], "il creator e' stato scritto lo stesso"
+
+
+def test_il_messaggio_dice_cosa_fare_e_non_nomina_la_cache(
+    client: TestClient, auth_headers: dict[str, str], apify: FakeApify
+) -> None:
+    """Chi legge l'errore deve capire il perche', non l'implementazione."""
+    _valida_profilo_privato(client, auth_headers, apify)
+
+    messaggio = _aggiungi(client, auth_headers, "creator").json()["error"]["message"]
+
+    assert "privato" in messaggio.lower()
+    assert "pubblico" in messaggio.lower(), "manca la via d'uscita"
+    for interno in ("cache", "creator_validations", "apify", "supabase"):
+        assert interno not in messaggio.lower(), f"il messaggio nomina '{interno}'"
+
+
+def test_maiuscole_diverse_non_aggirano_la_guardia(
+    client: TestClient, auth_headers: dict[str, str], apify: FakeApify
+) -> None:
+    """La riga si scrive minuscola: se la guardia non normalizzasse allo stesso
+    modo, `@Creator` sarebbe un cache miss e passerebbe. Non un errore visibile:
+    una guardia che non guarda."""
+    _valida_profilo_privato(client, auth_headers, apify)
+
+    assert _aggiungi(client, auth_headers, "CREATOR").status_code == 422
+    assert _aggiungi(client, auth_headers, "@Creator").status_code == 422
+
+
+def test_senza_una_riga_in_cache_il_creator_si_aggiunge(
+    client: TestClient, auth_headers: dict[str, str]
+) -> None:
+    """Fail-open: non sapere non e' un motivo per impedire."""
+    assert _aggiungi(client, auth_headers, "sconosciuto").status_code == 201
+
+
+def test_la_guardia_non_chiama_il_provider_ne_consuma_quota(
+    client: TestClient, auth_headers: dict[str, str], apify: FakeApify, store: FakeStore
+) -> None:
+    """E' il vincolo che le da' la forma: aggiungere un creator resta gratis."""
+    assert _aggiungi(client, auth_headers, "sconosciuto").status_code == 201
+
+    assert apify.profile_calls == [], "la guardia ha validato per conto suo"
+    assert store.rows("validation_events") == [], "ha consumato la quota di un altro endpoint"
+
+
+def test_una_riga_scaduta_non_blocca(
+    client: TestClient, auth_headers: dict[str, str], apify: FakeApify, store: FakeStore
+) -> None:
+    """Oltre il TTL non si sa piu' se sia ancora privato, e "non si sa" lascia
+    passare — lo stesso motivo per cui `_valida` lo rivaliderebbe."""
+    _valida_profilo_privato(client, auth_headers, apify)
+    vecchio = datetime.now(UTC) - timedelta(hours=25)
+    store.rows("creator_validations")[0]["checked_at"] = vecchio.isoformat()
+
+    assert _aggiungi(client, auth_headers, "creator").status_code == 201
+
+
+def test_una_riga_di_cache_illeggibile_non_blocca(
+    client: TestClient, auth_headers: dict[str, str], apify: FakeApify, store: FakeStore
+) -> None:
+    """Uno schema che non si legge piu' non e' un'accusa di essere privati."""
+    _valida_profilo_privato(client, auth_headers, apify)
+    store.rows("creator_validations")[0]["response"] = {"forma": "di un altro schema"}
+
+    assert _aggiungi(client, auth_headers, "creator").status_code == 201
+
+
+def test_un_profilo_tornato_pubblico_si_puo_aggiungere(
+    client: TestClient, auth_headers: dict[str, str], apify: FakeApify, store: FakeStore
+) -> None:
+    _valida_profilo_privato(client, auth_headers, apify)
+    vecchio = datetime.now(UTC) - timedelta(hours=25)
+    store.rows("creator_validations")[0]["checked_at"] = vecchio.isoformat()
+    apify.profile = ScrapedProfile(username="creator", is_private=False)
+    _valida(client, auth_headers, "instagram.com/creator")
+
+    assert _aggiungi(client, auth_headers, "creator").status_code == 201
+
+
+def test_un_account_inesistente_in_cache_non_blocca(
+    client: TestClient, auth_headers: dict[str, str], apify: FakeApify
+) -> None:
+    """Scelta deliberata, non una dimenticanza.
+
+    `is_public` e' falso anche su un account inesistente — perche' non c'e' nulla
+    di pubblico, non perche' sia privato — e la guardia guarda `exists` per
+    primo. Bloccare anche questo caso e' un'altra decisione: un account puo'
+    essere nato nelle 24h di TTL, e l'interfaccia lo copre gia' per conto suo.
+    """
+    apify.profile = None
+    assert _valida(client, auth_headers, "instagram.com/fantasma").json()["exists"] is False
+
+    assert _aggiungi(client, auth_headers, "fantasma").status_code == 201
+
+
+def test_la_guardia_di_un_utente_vale_anche_per_gli_altri(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    other_auth_headers: dict[str, str],
+    apify: FakeApify,
+) -> None:
+    """La cache e' condivisa di proposito: che un profilo sia privato non e' un
+    dato di chi l'ha verificato per primo."""
+    _valida_profilo_privato(client, auth_headers, apify)
+
+    assert _aggiungi(client, other_auth_headers, "creator").status_code == 422
+
+
+
+# =============================================================================
 # `checked_at` non deve dire QUANDO, solo QUANTO E' VECCHIO
 # =============================================================================
 # `creator_validations` e' condivisa fra tutti gli utenti: su un cache hit il

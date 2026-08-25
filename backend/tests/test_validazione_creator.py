@@ -669,3 +669,90 @@ def test_un_avatar_con_schema_inatteso_viene_scartato(
     corpo = _valida(client, auth_headers, "instagram.com/creator").json()
 
     assert corpo["profile"]["avatar_url"] is None
+
+
+# =============================================================================
+# `checked_at` non deve dire QUANDO, solo QUANTO E' VECCHIO
+# =============================================================================
+# `creator_validations` e' condivisa fra tutti gli utenti: su un cache hit il
+# timestamp restituito e' l'istante in cui **qualcun altro** ha validato quel
+# creator. Al secondo, e' un oracolo su cosa stanno guardando gli altri.
+
+
+def _checked_at(risposta: Any) -> datetime:
+    return datetime.fromisoformat(risposta.json()["checked_at"])
+
+
+def test_checked_at_e_arrotondato_alla_finestra_del_ttl(
+    client: TestClient, auth_headers: dict[str, str], apify: FakeApify
+) -> None:
+    """Il valore che esce e' l'inizio della finestra, non l'istante esatto."""
+    apify.profile = ScrapedProfile(username="creator", follower_count=10)
+
+    restituito = _checked_at(_valida(client, auth_headers, "instagram.com/creator"))
+
+    assert restituito.tzinfo is not None, "il timestamp deve restare consapevole del fuso"
+    assert (restituito.minute, restituito.second, restituito.microsecond) == (0, 0, 0), (
+        "l'istante esatto e' ancora visibile: l'arrotondamento non e' avvenuto"
+    )
+    # Con TTL 24h la finestra e' la giornata UTC: il valore non puo' essere nel
+    # futuro ne' piu' vecchio della finestra stessa.
+    adesso = datetime.now(UTC)
+    assert restituito <= adesso
+    assert adesso - restituito < timedelta(hours=25)
+
+
+def test_il_cache_hit_non_rivela_l_istante_della_validazione_altrui(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    other_auth_headers: dict[str, str],
+    apify: FakeApify,
+    store: FakeStore,
+) -> None:
+    """E' la proprieta' che chiude l'oracolo, e va provata su un istante NOTO.
+
+    Confrontare fra loro le due risposte non basta: senza arrotondamento
+    sarebbero identiche lo stesso, perche' il secondo utente riceve la riga
+    cachata dal primo. Il test discrimina solo se l'istante scritto in cache e'
+    riconoscibile — qui `13:47:23` — e la risposta NON lo contiene.
+    """
+    apify.profile = ScrapedProfile(username="creator", follower_count=10)
+    _valida(client, auth_headers, "instagram.com/creator")
+
+    # Riscrivo la riga con un istante inconfondibile, come se l'avesse prodotta
+    # un altro utente in un momento preciso della giornata.
+    riga = store.rows("creator_validations")[0]
+    istante = datetime.now(UTC).replace(hour=13, minute=47, second=23, microsecond=0)
+    riga["checked_at"] = istante.isoformat()
+    riga["response"] = {**riga["response"], "checked_at": istante.isoformat()}
+
+    letto = _checked_at(_valida(client, other_auth_headers, "instagram.com/creator"))
+
+    assert len(apify.profile_calls) == 1, "il secondo doveva essere un cache hit"
+    assert letto != istante, (
+        "la risposta contiene l'istante esatto della validazione altrui"
+    )
+    assert (letto.minute, letto.second) == (0, 0), (
+        "il valore non e' stato arrotondato alla finestra"
+    )
+
+
+def test_l_istante_esatto_resta_in_cache_per_il_calcolo_del_ttl(
+    client: TestClient, auth_headers: dict[str, str], apify: FakeApify, store: FakeStore
+) -> None:
+    """Si arrotonda solo cio' che esce, non cio' che si conserva.
+
+    La scadenza della cache si calcola sulla colonna `checked_at` della riga: se
+    ci finisse il valore arrotondato, il TTL slitterebbe fino a 24 ore.
+    """
+    apify.profile = ScrapedProfile(username="creator", follower_count=10)
+    restituito = _checked_at(_valida(client, auth_headers, "instagram.com/creator"))
+
+    righe = store.rows("creator_validations")
+    assert len(righe) == 1
+    salvato = datetime.fromisoformat(righe[0]["checked_at"])
+
+    assert salvato >= restituito, "il valore salvato non puo' precedere la finestra"
+    assert (salvato.minute, salvato.second) != (0, 0) or salvato != restituito, (
+        "in cache e' finito il valore arrotondato: il TTL slitterebbe"
+    )

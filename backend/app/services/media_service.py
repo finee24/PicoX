@@ -457,7 +457,7 @@ async def download_to_temp(
             logger.warning("Impossibile rimuovere il file temporaneo %s", temp_path, exc_info=True)
 
 
-async def _assert_public_target(url: str) -> None:
+async def assert_public_target(url: str) -> None:
     """Rifiuta gli URL che puntano alla rete interna.
 
     `video_url` arriva dall'utente, quindi senza questo controllo l'endpoint di
@@ -542,7 +542,7 @@ async def _open_validated_stream(
     current = url
 
     for _ in range(_MAX_REDIRECTS + 1):
-        await _assert_public_target(current)
+        await assert_public_target(current)
 
         response = await client.send(
             client.build_request("GET", current, headers=_per_hop_headers(current, settings)),

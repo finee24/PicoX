@@ -324,7 +324,9 @@ async def scoped_table(
         yield ScopedTable(client, table, user_id)
 
 
-async def unscoped_service_table(table: str, *, reason: str) -> AsyncRequestBuilder:
+async def unscoped_service_table(
+    table: str, *, reason: str, di_routine: bool = False
+) -> AsyncRequestBuilder:
     """Accesso service-role **non** filtrato per utente.
 
     Ammesso solo dove uno scoping per utente non è definibile: il job cron deve
@@ -335,6 +337,25 @@ async def unscoped_service_table(table: str, *, reason: str) -> AsyncRequestBuil
     Vincolata da `_UNSCOPED_ALLOWED`: il log del motivo aiuta la review, ma non
     impedisce nulla da solo. L'allowlist sì — estenderla è una modifica visibile
     a questo modulo, non una riga in più in un router.
+
+    ## `di_routine`, e perché il livello del log non è sempre lo stesso
+
+    Questo log nasce come **segnale raro**: una query non scopata è un evento da
+    notare, e il suo valore stava tutto nel comparire di rado. Da quando
+    `creator_validations` è in allowlist, la lettura della cache lo fa scattare a
+    ogni richiesta di validazione — anche sui cache hit, che non costano nulla e
+    non hanno nulla di eccezionale. Un segnale che scatta sempre non è più un
+    segnale: chi legge i log smette di guardarlo, ed è il modo in cui una difesa
+    muore senza che nessuno la disattivi.
+
+    `di_routine=True` marca i percorsi in cui la query non scopata è **attesa e
+    frequente**: quelli scendono a `DEBUG`. Tutto il resto resta `INFO`, dove la
+    rarità è ciò che lo rende leggibile.
+
+    Non sparisce comunque nulla: entrambi i rami emettono `unscoped=True` come
+    campo strutturato via `extra=`, che `JsonLogFormatter` promuove a chiave di
+    primo livello. Una query su tutte le query non scopate resta possibile anche
+    a `DEBUG` spento in produzione — è filtrabile, non solo cercabile nel testo.
     """
     if table not in _UNSCOPED_ALLOWED:
         raise RuntimeError(
@@ -342,7 +363,15 @@ async def unscoped_service_table(table: str, *, reason: str) -> AsyncRequestBuil
             "Usare service_table(table, user_id); se il bypass è davvero "
             "necessario, aggiungere la tabella a _UNSCOPED_ALLOWED motivandolo."
         )
-    logger.info("Query service-role non scopata su '%s' — motivo: %s", table, reason)
+
+    livello = logging.DEBUG if di_routine else logging.INFO
+    logger.log(
+        livello,
+        "Query service-role non scopata su '%s' — motivo: %s",
+        table,
+        reason,
+        extra={"unscoped": True, "tabella": table, "motivo": reason, "di_routine": di_routine},
+    )
     return (await _get_service_client()).table(table)
 
 

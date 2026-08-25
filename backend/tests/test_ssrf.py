@@ -1,4 +1,4 @@
-"""La difesa SSRF di `_assert_public_target` (voce A10 dell'audit).
+"""La difesa SSRF di `assert_public_target` (voce A10 dell'audit).
 
 `video_url` arriva dall'utente, quindi senza questo controllo `analyze-video` e'
 un SSRF: si fa scaricare al backend `http://169.254.169.254/…` — i metadata
@@ -25,7 +25,10 @@ import pytest
 
 from app.core.config import get_settings
 from app.core.exceptions import ExternalServiceError, PicoxValidationError
-from app.services.media_service import _assert_public_target, _open_validated_stream
+from app.schemas.scraping import ScraperResult
+from app.services.analysis_service import run_analysis
+from app.services.media_service import _open_validated_stream, assert_public_target
+from tests.conftest import FakeGemini
 
 PUBBLICO = "93.184.216.34"
 
@@ -76,7 +79,7 @@ async def test_un_host_che_risolve_sulla_rete_interna_viene_rifiutato(
     _risolvi_come(monkeypatch, {"interno.example": [ip]})
 
     with pytest.raises(PicoxValidationError) as errore:
-        await _assert_public_target("https://interno.example/video.mp4")
+        await assert_public_target("https://interno.example/video.mp4")
 
     # Il messaggio non rivela l'indirizzo risolto: sarebbe un oracolo per
     # mappare la rete interna un host alla volta.
@@ -90,7 +93,7 @@ async def test_un_host_pubblico_passa(monkeypatch: pytest.MonkeyPatch) -> None:
     una funzione che rifiuta tutto."""
     _risolvi_come(monkeypatch, {"cdn.example": [PUBBLICO]})
 
-    await _assert_public_target("https://cdn.example/video.mp4")
+    await assert_public_target("https://cdn.example/video.mp4")
 
 
 async def test_basta_un_indirizzo_interno_fra_tanti(
@@ -104,7 +107,7 @@ async def test_basta_un_indirizzo_interno_fra_tanti(
     _risolvi_come(monkeypatch, {"misto.example": [PUBBLICO, "127.0.0.1"]})
 
     with pytest.raises(PicoxValidationError):
-        await _assert_public_target("https://misto.example/video.mp4")
+        await assert_public_target("https://misto.example/video.mp4")
 
 
 # =============================================================================
@@ -128,14 +131,14 @@ async def test_solo_http_e_https(url: str, monkeypatch: pytest.MonkeyPatch) -> N
     _risolvi_come(monkeypatch, {})
 
     with pytest.raises(PicoxValidationError):
-        await _assert_public_target(url)
+        await assert_public_target(url)
 
 
 async def test_un_url_senza_host_viene_rifiutato(monkeypatch: pytest.MonkeyPatch) -> None:
     _risolvi_come(monkeypatch, {})
 
     with pytest.raises(PicoxValidationError):
-        await _assert_public_target("https:///video.mp4")
+        await assert_public_target("https:///video.mp4")
 
 
 async def test_un_host_irrisolvibile_non_e_un_errore_di_validazione(
@@ -147,7 +150,7 @@ async def test_un_host_irrisolvibile_non_e_un_errore_di_validazione(
     _risolvi_come(monkeypatch, {})
 
     with pytest.raises(ExternalServiceError):
-        await _assert_public_target("https://inesistente.example/video.mp4")
+        await assert_public_target("https://inesistente.example/video.mp4")
 
 
 # =============================================================================
@@ -210,3 +213,61 @@ async def test_una_catena_di_redirect_troppo_lunga_si_ferma(
             )
 
     assert len(richieste) <= 6, f"nessun tetto ai redirect: {len(richieste)} richieste"
+
+# =============================================================================
+# 4. Il ramo passthrough non salta il controllo
+# =============================================================================
+# `assert_public_target` viveva solo dentro il percorso di download. Il
+# passthrough YouTube quel percorso lo salta per definizione — a scaricare e'
+# Google — e con esso saltava la difesa: un URL puntato alla rete interna
+# arrivava a Gemini senza che nessuno lo guardasse (voce 2 delle cinque aperte
+# dalla review della PR #7).
+
+
+async def test_il_passthrough_rifiuta_un_url_che_risolve_sulla_rete_interna(
+    gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L'URL del passthrough passa dallo stesso controllo del download.
+
+    Falsificabile: togliendo la chiamata ad `assert_public_target` dal ramo
+    passthrough di `run_analysis`, questo test fallisce — l'URL interno arriva
+    a Gemini e non viene sollevato nulla.
+    """
+    _risolvi_come(monkeypatch, {"interno.example": ["127.0.0.1"]})
+    scraped = ScraperResult(
+        platform="youtube_shorts",
+        youtube_url="https://interno.example/shorts/abc",
+    )
+
+    with pytest.raises(PicoxValidationError):
+        await run_analysis(
+            scraped,
+            video_url="https://youtube.com/shorts/abc",
+            mode="INFO",
+            settings=get_settings(),
+            gemini=gemini,  # type: ignore[arg-type]  # doppio, non sottotipo
+        )
+
+    assert gemini.url_calls == [], "l'URL interno e' arrivato a Gemini"
+
+
+async def test_il_passthrough_lascia_passare_un_host_pubblico(
+    gemini: FakeGemini, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gruppo di controllo: senza, il test sopra sarebbe verde anche con una
+    funzione che rifiuta tutto."""
+    _risolvi_come(monkeypatch, {"pubblico.example": [PUBBLICO]})
+    scraped = ScraperResult(
+        platform="youtube_shorts",
+        youtube_url="https://pubblico.example/shorts/abc",
+    )
+
+    await run_analysis(
+        scraped,
+        video_url="https://youtube.com/shorts/abc",
+        mode="INFO",
+        settings=get_settings(),
+        gemini=gemini,  # type: ignore[arg-type]  # doppio, non sottotipo
+    )
+
+    assert len(gemini.url_calls) == 1, "il passthrough non ha raggiunto Gemini"

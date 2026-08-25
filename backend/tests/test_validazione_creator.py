@@ -822,6 +822,98 @@ def test_la_guardia_di_un_utente_vale_anche_per_gli_altri(
     assert _aggiungi(client, other_auth_headers, "creator").status_code == 422
 
 
+# =============================================================================
+# 7. L'handle canonico di YouTube: l'unica stringa che entra da fuori
+# =============================================================================
+#
+# `customUrl` e' l'handle secondo YouTube e vince su quello scritto (sezione 2).
+# Ma arriva dal provider, non da `parse_creator_input`: era l'unico
+# identificatore che finiva in `normalized_identifier` senza passare da
+# `clean_username` — cioe' senza la regola che `POST /api/v1/creators` applica
+# comunque al campo `username`, e che quindi lo rifiutava dopo averlo promesso.
+#
+# Il ripiego e' sulla forma cercata, non un errore: la verifica e' riuscita e
+# l'account esiste, cio' che manca e' solo un alias piu' bello da mostrare.
+
+
+def _canale(handle: str) -> YouTubeChannel:
+    return YouTubeChannel(
+        channel_id="UCaaaaaaaaaaaaaaaaaaaaaa",
+        handle=handle,
+        title="Creator Ufficiale",
+    )
+
+
+def test_un_custom_url_fuori_charset_non_diventa_l_identificatore(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    youtube: FakeYouTube,
+    store: FakeStore,
+) -> None:
+    """Cio' che il provider chiama handle non e' detto sia un handle."""
+    youtube.channel = _canale("creator/../altro")
+
+    corpo = _valida(client, auth_headers, "youtube.com/@creator").json()
+
+    assert corpo["normalized_identifier"] == "creator", (
+        "una stringa che clean_username rifiuta e' arrivata al client "
+        "come identificatore"
+    )
+
+    riga = store.rows("creator_validations")[0]
+    # La colonna e' la forma **cercata** anche senza questo fix: la riga si
+    # chiave su quella (decisione ancora aperta). Qui conta il payload, che
+    # e' cio' che viene servito a chiunque rilegga la riga per 24 ore.
+    assert riga["normalized_identifier"] == "creator"
+    assert riga["response"]["normalized_identifier"] == "creator", (
+        "la cache condivisa serve la stringa rifiutata a chi la rilegge"
+    )
+
+
+def test_un_custom_url_valido_resta_l_handle_canonico(
+    client: TestClient, auth_headers: dict[str, str], youtube: FakeYouTube
+) -> None:
+    """Il caso comune non cambia: validare non vuol dire filtrare il canonico."""
+    youtube.channel = _canale("CreatorReale")
+
+    corpo = _valida(client, auth_headers, "youtube.com/@creator-scritto-male").json()
+
+    assert corpo["normalized_identifier"] == "creatorreale"
+
+
+def test_l_identificatore_restituito_e_accettato_da_post_creators(
+    client: TestClient, auth_headers: dict[str, str], youtube: FakeYouTube
+) -> None:
+    """La promessa dello schema, e il vicolo cieco che chiude.
+
+    Prima: `validate` rispondeva 200 con una stringa che il validator del body
+    rifiutava. L'utente vedeva una verifica riuscita e una creazione
+    impossibile, senza nulla da correggere nel campo che aveva scritto.
+    """
+    youtube.channel = _canale("creator/../altro")
+
+    corpo = _valida(client, auth_headers, "youtube.com/@creator").json()
+    creato = _aggiungi(
+        client, auth_headers, corpo["normalized_identifier"], "youtube_shorts"
+    )
+
+    assert creato.status_code == 201, creato.text
+
+
+def test_un_custom_url_vuoto_ricade_sulla_forma_cercata(
+    client: TestClient, auth_headers: dict[str, str], youtube: FakeYouTube
+) -> None:
+    """Un canale il cui `customUrl` si riduce a stringa vuota.
+
+    Prima ci pensava l'`or` a valle; ora e' lo stesso ripiego di tutti gli altri
+    casi, e questo test impedisce che sparisca insieme all'`or`.
+    """
+    youtube.channel = _canale("")
+
+    corpo = _valida(client, auth_headers, "youtube.com/@creator").json()
+
+    assert corpo["normalized_identifier"] == "creator"
+
 
 # =============================================================================
 # `checked_at` non deve dire QUANDO, solo QUANTO E' VECCHIO

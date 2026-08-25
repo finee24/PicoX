@@ -218,8 +218,12 @@ class CreatorValidationResponse(BaseModel):
     normalized_identifier: str = Field(
         description=(
             "Handle estratto e normalizzato: minuscolo, senza '@' e senza URL "
-            "attorno. È il valore da passare a `POST /api/v1/creators`, ed è la "
-            "chiave con cui la verifica viene messa in cache."
+            "attorno. È il valore da passare a `POST /api/v1/creators`, e "
+            "supera sempre la stessa validazione che quell'endpoint applica al "
+            "campo `username`. **Non è necessariamente la chiave sotto cui la "
+            "verifica è in cache:** su YouTube può essere l'handle canonico del "
+            "canale (`customUrl`), mentre la riga resta indicizzata sulla forma "
+            "cercata."
         )
     )
     exists: bool = Field(description="L'account è stato trovato sulla piattaforma.")

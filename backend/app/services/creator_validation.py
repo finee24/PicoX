@@ -453,6 +453,41 @@ def _non_trovato(target: TargetValidazione) -> CreatorValidationResponse:
     )
 
 
+def _handle_canonico(grezzo: str, target: TargetValidazione) -> str:
+    """L'handle che il provider dice canonico, **solo se è un handle valido**.
+
+    `customUrl` arriva da YouTube, non da noi: è l'unica stringa che entra come
+    identificatore senza passare da `clean_username`. Finiva `.lower()` e basta
+    in `normalized_identifier`, cioè nel valore che lo schema dichiara buono per
+    `POST /api/v1/creators` — dove però quella regola viene applicata davvero, e
+    un valore fuori charset diventava un `422` su una verifica appena riuscita:
+    vicolo cieco per l'utente, ed esattamente la divergenza che `clean_username`
+    esiste per impedire (vedi il suo docstring).
+
+    Quando non valida si ripiega sulla **forma cercata**, già passata da
+    `parse_creator_input` e quindi valida per costruzione. Non si solleva: la
+    verifica è riuscita, l'account esiste, e ciò che manca è solo un alias più
+    bello da mostrare. Farne un errore butterebbe via una chiamata già pagata
+    per un dettaglio cosmetico.
+
+    Copre da sé anche il `customUrl` vuoto, che prima ricadeva sull'`or`.
+    """
+    try:
+        return _normalizza_handle(grezzo)
+    except PicoxValidationError:
+        # Il valore rifiutato serve per capire *cosa* ha risposto YouTube, ma
+        # arriva da fuori: `repr` neutralizza gli a capo (una riga di log
+        # falsificata) e il taglio impedisce che una stringa lunga a piacere
+        # diventi una riga di log lunga a piacere.
+        logger.warning(
+            "Handle canonico non valido da YouTube per %s/%s (%s): si tiene la forma cercata.",
+            target.platform,
+            target.identifier,
+            repr(grezzo[:80]),
+        )
+        return target.identifier
+
+
 async def _interroga_provider(
     target: TargetValidazione,
     *,
@@ -468,9 +503,9 @@ async def _interroga_provider(
         return CreatorValidationResponse(
             platform=target.platform,
             # L'handle canonico secondo YouTube (`customUrl`) può differire da
-            # quello scritto: si tiene quello, così la cache e il creator creato
-            # dopo puntano allo stesso valore.
-            normalized_identifier=canale.handle.lower() or target.identifier,
+            # quello scritto: si tiene quello, ma solo dopo averlo validato come
+            # si valida qualunque altro handle — è l'unico che arriva da fuori.
+            normalized_identifier=_handle_canonico(canale.handle, target),
             exists=True,
             # Un canale con un handle che risolve è pubblico per costruzione:
             # YouTube non ha canali visibili ai soli iscritti. Vedi la docstring

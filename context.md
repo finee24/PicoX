@@ -31,17 +31,22 @@ git status
 gh pr list
 ```
 
+**La migration `0011` (tetto globale di spesa) è applicata in produzione
+(`jaimkiagtolxbkftjapx`) dal 22 agosto 2026 — non riapplicarla.** Il verbale
+della verifica sta nel commit e nella migration. `daily_cap_usd` è a `100.00`.
+
+## Prima di accendere il cron
+
 **`CRON_ENABLED` è `false` (`backend/render.yaml:73`), spento per scelta dal
 22 agosto 2026 — non dimenticato.** Tecnicamente non manca nulla: PR sul cron
-mergiata (`ee547a2`), migration `0005` applicata dal 15 agosto. Si è deciso di
-non spendere finché la data di lancio non è fissata: il cron richiede un deploy
-Render attivo, e quel deploy richiede una carta. Quando si riprende, l'ordine è
-quello di `backend/app/cron_config.md` — prima lo scheduler (passo 2, l'unico
-da fare), **poi** `CRON_ENABLED=true`.
-Accenderlo prima non avvia nulla: apre soltanto
+mergiata (`ee547a2`), migration `0005` applicata dal 15 agosto. Non si spende
+finché la data di lancio non è fissata: il cron richiede un deploy Render
+attivo, e quel deploy una carta. Quando si riprende, l'ordine è quello di
+`backend/app/cron_config.md` — prima lo scheduler (passo 2, l'unico da fare),
+**poi** `CRON_ENABLED=true`. Accenderlo prima non avvia nulla: apre soltanto
 `POST /api/v1/cron/check-updates` a chi ha `CRON_SECRET`.
 
-**Il tetto globale di spesa (`0011`) non copre il cron**: scrive fuori da
+**Il tetto globale (`0011`) non copre il cron**: scrive fuori da
 `analysis_events` per scelta della `0008` — `conta_quota=False` (`cron.py:198`)
 e i trigger del tetto sono `before insert` su quella tabella (`0011:281-291`),
 quindi nessuna riga, nessun controllo. Prima di accendere serve un tetto
@@ -49,10 +54,6 @@ dedicato al cron o l'unione dei due budget: altrimenti gira senza alcun limite
 globale sopra. E il **primo giro è il più caro**, non un costo graduale: il
 dedup non trova nulla di già analizzato e accoda fino a 10 analisi per creator
 attivo (`apify_results_per_creator`).
-
-**La migration `0011` (tetto globale di spesa) è applicata in produzione
-(`jaimkiagtolxbkftjapx`) dal 22 agosto 2026 — non riapplicarla.** Il verbale
-della verifica sta nel commit e nella migration. `daily_cap_usd` è a `100.00`.
 
 ## Task attivi
 

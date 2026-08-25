@@ -52,8 +52,7 @@ nella migration stessa. `daily_cap_usd` è a `100.00`.
 **Due opzioni su quattro sono fatte** — dettaglio in `SECURITY_AUDIT.md`, A4:
 
 1. ~~CAPTCHA al signup~~ — **fatta** (24 agosto 2026): Turnstile sul form, token
-   in `options.captchaToken`, verificato da Supabase Auth. Provato nei due versi
-   (senza token `400 captcha_failed`; con token, signup ed email reali).
+   in `options.captchaToken`, verificato da Supabase Auth, provato nei due versi.
    **In produzione servono chiavi reali**: ora ci sono quelle di test, che
    passano sempre — implementata non è ancora protetta.
 2. Limite di registrazioni per IP o dominio email — aperta
@@ -90,10 +89,13 @@ archivio. Restano:
 
 1. **`is_private` fail-open** quando l'actor non espone il campo:
    `is_private=bool(privato)` (`apify_service.py:269`) è invariato dalla PR #7.
-   Il branch `blocca-follow-profili-privati` è rebasato e pronto, ma copre solo
-   i profili *noti* come privati e non ha ancora una PR.
-2. **L'handle canonico YouTube** non ripassa dalla validazione dell'handle —
-   mai affrontata.
+   **PR #13 mergiata** (25 agosto 2026, `5878c75`): copre solo il caso *già
+   noto come privato* — blocco UI e guardia su `POST /creators` che legge la
+   cache. Il fail-open qui sopra **resta aperto**.
+2. **L'handle canonico YouTube** non ripassa dalla validazione dell'handle.
+   Diagnosi del 25 agosto 2026, fix **non deciso**: `customUrl` diventa
+   `normalized_identifier` con solo `.lower()` (`creator_validation.py:473`),
+   ma la cache resta chiavata sulla forma *cercata* (`:317`).
 
 ### A9, punto 2 — i link brevi (`vm.tiktok.com/...`) non sono risolti
 Deliberato, priorità bassa: risolverli con una `HEAD` metterebbe una chiamata
@@ -109,7 +111,7 @@ garantisca. Allinearli esplicitamente a UTC è un lavoro a sé, va fatto ai tre
 insieme se mai lo si fa: cambiarne uno solo creerebbe due "giorni" diversi
 nello stesso database.
 
-### Instagram non verificato per il parametro Apify mancante; YouTube ha un residuo di rischio sul ramo di fallback
+### Il parametro Apify mancante: Instagram mai verificato, YouTube sul fallback
 
 `_single_video_input` passa `shouldDownloadVideos: true` solo per TikTok
 (dove serviva: senza, l'actor non restituiva alcun URL scaricabile).
@@ -127,8 +129,6 @@ Apify** quando la durata non è verificabile via passthrough
 (`content_scraper.py:177-186`): è quel ramo, non tutto YouTube, a non
 essere mai stato controllato per lo stesso problema di TikTok.
 
-Corretto due volte dopo review sul codice reale: la prima nota (in
-`PROGRESS.md`) includeva YouTube per intero come a rischio; la seconda
-(qui, prima versione) invertiva la struttura — attribuiva a Instagram una
-distinzione passthrough/fallback che appartiene solo a YouTube.
+Già corretta due volte sul codice reale: non riattribuire a Instagram la
+distinzione passthrough/fallback, che è solo di YouTube.
 

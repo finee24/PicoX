@@ -297,3 +297,111 @@ sul codice del componente, perché salta esattamente il passaggio — l'idratazi
 — che poteva essere rotto.
 
 Pointer: PR sul branch `turnstile-signup`, `components/turnstile-widget.tsx`.
+
+---
+
+### `FATAL: An unexpected Turbopack error` con exit code `0xc0000142` su Windows
+
+**Quando/dove si e' visto:** `next dev` su Windows, al primo `Compiling
+/dashboard`. Il panic log dice che un processo Node figlio — quello che esegue
+il loader PostCSS per `app/globals.css` — muore **prima di connettersi**, con
+`Process output` e `Process error output` entrambi vuoti.
+
+```
+Failed to write app endpoint /dashboard/page
+Caused by:
+- [project]/app/globals.css [app-client] (css)
+- creating new process
+- node process exited before we could connect to it with exit code: 0xc0000142
+```
+
+**Ipotesi scartate, e perche':**
+- *"E' un processo residuo che occupa la porta"* — plausibile perche' era gia'
+  successo (vedi la voce su uvicorn), ma i dati la escludevano: i due processi
+  `next` erano la normale coppia padre/figlio, con **un solo** listener sulla
+  3000. Nessuna competizione.
+- *"E' il desktop heap di Windows esaurito"* — `0xc0000142` e'
+  `STATUS_DLL_INIT_FAILED`, che con memoria abbondante (4,2 GB liberi) punta
+  tipicamente li', e la sessione aveva creato e distrutto molti processi. Era
+  l'ipotesi piu' colta, e **era sbagliata**: il rimedio sarebbe stato riavviare
+  la macchina.
+
+**Causa reale:** cache `.next` corrotta — 555 MB. Nient'altro.
+
+**Fix:** terminare **entrambi** i PID di `next dev`, cancellare `.next`, e un
+solo `npm run dev`. Il panic non e' piu' ricomparso.
+
+Cio' che ha distinto le due ipotesi e' che il rimedio economico veniva **prima**
+di quello costoso: riavviare il solo dev server con la cache pulita costa un
+minuto, riavviare la macchina costa molto di piu' e avrebbe fatto sparire il
+sintomo lasciando credere a una causa di sistema. Quando due ipotesi prevedono
+lo stesso sintomo, si prova per prima quella che si smentisce a meno.
+
+---
+
+### Il widget Turnstile con sitekey di test compare, o non compare, senza regola
+
+**Quando/dove si e' visto:** verifica manuale del form di registrazione con la
+sitekey di test di Cloudflare `1x00000000000000000000AA`.
+
+**Ipotesi scartate, e perche' — tre in fila, ed e' il punto della voce:**
+1. *"Non disegna mai nulla"* — scritta nel docstring del componente e in
+   `.env.local.example` dopo **una sola** osservazione: contenitore vuoto,
+   `input[name="cf-turnstile-response"]` gia' valorizzato col token fittizio
+   `XXXX.DUMMY.TOKEN.XXXX`. Smentita dallo screenshot dopo un invio, dove il box
+   Cloudflare "Solo per test" era visibile.
+2. *"Non disegna al primo render, disegna dopo un reset()"* — la correzione,
+   committata. Smentita al caricamento successivo, dove il widget era visibile
+   **subito**, senza alcun reset di mezzo.
+3. *"Allora dipende dal reset"* — no: le due osservazioni erano incompatibili
+   fra loro, non componibili in una regola.
+
+**Causa reale:** il rendering della chiave di test **non e' deterministico** —
+dipende da quanto Cloudflare impiega a rispondere e da quando il token arriva.
+Nessuna delle tre formulazioni descriveva un comportamento stabile, perche' un
+comportamento stabile non c'e'.
+
+**Fix:** smettere di descrivere *quando* si disegna e descrivere cio' che e'
+verificabile: il widget **puo'** comparire o no, in entrambi i casi senza
+richiedere interazione, e l'unica cosa che conta e' il campo
+`cf-turnstile-response`. L'assenza del box non indica un montaggio fallito.
+
+La lezione non e' su Turnstile: **due osservazioni non fanno una regola**, e
+scrivere un assoluto (`mai`, `sempre`) sulla base di una sola e' il modo piu'
+rapido di dover correggere due volte. Se il comportamento di un componente di
+terzi sembra avere una regola, servono piu' osservazioni di quante se ne hanno
+quasi sempre.
+
+---
+
+### `@picox.invalid` sembrava superare la validazione email di Supabase
+
+**Quando/dove si e' visto:** test del CAPTCHA sul signup. Servendo un dominio
+non consegnabile per non spedire email a caselle vere, `@example.com` e
+`@picox.test` rispondevano `400 email_address_invalid`, mentre `@picox.invalid`
+rispondeva `429 over_email_send_rate_limit`.
+
+**Ipotesi scartate, e perche':**
+- *"`.invalid` passa la validazione, gli altri due no"* — l'inferenza ovvia
+  dalle tre risposte, e sbagliata. Su quella base sono stati fatti **due**
+  tentativi di signup dal browser, entrambi condannati in partenza per un
+  motivo che non era quello che sembrava.
+
+**Causa reale:** il **rate limiter dell'invio email interviene prima** del
+controllo sul dominio, e ne maschera l'esito. Con la quota esaurita ogni
+richiesta torna `429`, qualunque sia l'indirizzo. A quota liberata, `.invalid`
+risulta rifiutato come gli altri TLD riservati dalla RFC 2606.
+
+**Fix:** nessun codice. Per un test di signup che deve arrivare in fondo serve
+un dominio che Supabase accetti — quindi non un TLD riservato — e per non
+spedire a estranei si usa un sottoindirizzo di un indirizzo proprio
+(`nome+picox-test@gmail.com`).
+
+Il vincolo vero, scoperto nello stesso giro: l'SMTP condiviso di Supabase
+concede **2 email/ora**, campo fisso non modificabile (Authentication → Rate
+Limits). Ogni tentativo ne consuma una: un ciclo di sonde su piu' domini brucia
+la quota in un minuto ed e' quello che e' successo.
+
+**Non fidarsi di una risposta HTTP per inferire quale controllo l'ha prodotta**
+quando un limitatore a monte puo' rispondere per primo: quello che sembra un
+esito e' una precedenza.

@@ -81,17 +81,19 @@ per davvero. Conta perché `render.yaml` con `runtime: docker` è l'unica cosa
 che rende vero `MAX_VIDEO_DURATION_SECONDS` in produzione. ~10 minuti una
 volta installato Docker.
 
-### Cinque voci aperte per scelta dalla review di sicurezza della PR #7
-Nessuna bloccante — dettaglio in `docs/archive/PROGRESS-2026-08-15.md`, sezione
-"APERTE — cinque voci non bloccanti":
-1. `creator_validations.checked_at` — oracolo cross-tenant a basso impatto
-2. Il passthrough del cron non riverifica l'host prima di darlo a Gemini
-3. Il log di audit delle query non scopate ha perso valore di segnale
-4. L'handle canonico YouTube non ripassa dalla validazione dell'handle
-5. `is_private` fail-open quando l'actor non espone il campo — **resta
-   aperta**: `is_private=bool(privato)` (`apify_service.py:269`) è invariato
-   dalla PR #7, e "l'actor non ne parla" vale ancora "pubblico". Il branch
-   `blocca-follow-profili-privati` copre solo i profili *noti* come privati.
+### Review di sicurezza della PR #7 — due voci su cinque ancora aperte
+**Tre chiuse dalla PR #12** (25 agosto 2026): `checked_at` troncato alla
+finestra del TTL, il passthrough che riusa `assert_public_target`, il log delle
+query non scopate a `DEBUG` sui percorsi di routine. L'elenco originale sta in
+`docs/archive/PROGRESS-2026-08-15.md`, che le dà ancora tutte per aperte: è un
+archivio. Restano:
+
+1. **`is_private` fail-open** quando l'actor non espone il campo:
+   `is_private=bool(privato)` (`apify_service.py:269`) è invariato dalla PR #7.
+   Il branch `blocca-follow-profili-privati` è rebasato e pronto, ma copre solo
+   i profili *noti* come privati e non ha ancora una PR.
+2. **L'handle canonico YouTube** non ripassa dalla validazione dell'handle —
+   mai affrontata.
 
 ### A9, punto 2 — i link brevi (`vm.tiktok.com/...`) non sono risolti
 Deliberato, priorità bassa: risolverli con una `HEAD` metterebbe una chiamata

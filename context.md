@@ -60,39 +60,31 @@ attivo (`apify_results_per_creator`).
 ### A4 — rischio Sybil (più account)
 **Due opzioni su quattro sono fatte** — dettaglio in `SECURITY_AUDIT.md`, A4:
 
-1. ~~CAPTCHA al signup~~ — **fatta** (24 agosto 2026): Turnstile sul form, token
-   in `options.captchaToken`, verificato da Supabase Auth, provato nei due versi.
-   **In produzione servono chiavi reali**: ora ci sono quelle di test, che
-   passano sempre — implementata non è ancora protetta.
+1. ~~CAPTCHA al signup~~ — **fatta** (24 agosto), ma provata **solo sul
+   signup**: il login era rotto, chiuso dalla PR #15. **In produzione servono
+   chiavi reali**: ora ci sono quelle di test, che passano sempre.
 2. Limite di registrazioni per IP o dominio email — aperta
 3. Verifica della carta anche sul piano gratuito — aperta
-4. ~~Tetto globale di spesa~~ — **fatta** (22 agosto): migration `0011`,
-   `PX004` → `409 global_capacity_reached`. Chiude la spesa, **non** la
-   registrazione di massa: chi crea abbastanza account può esaurire il tetto e
-   fermare il servizio — un'indisponibilità, non un costo.
+4. ~~Tetto globale di spesa~~ — **fatta** (22 agosto): `0011`, `PX004` → `409
+   global_capacity_reached`. Chiude la spesa, **non** la registrazione di massa:
+   chi crea abbastanza account esaurisce il tetto e ferma il servizio.
 
 **L'SMTP condiviso di Supabase permette solo 2 email/ora** (campo fisso in
-dashboard, non modificabile). È il vero vincolo di lancio, non un dettaglio:
-configurare un SMTP proprio è un **prerequisito**, non un'ottimizzazione.
-
-E nello stesso momento in cui lo si fa, il CAPTCHA diventa l'**unica** barriera
-Sybil residua, perché configurare l'SMTP toglie l'altra protezione di fatto —
-quella quota — senza alcun segnale.
+dashboard, non modificabile): è un **prerequisito** di lancio, non
+un'ottimizzazione. E configurarlo toglie l'altra barriera Sybil di fatto —
+quella quota — senza alcun segnale, lasciando il solo CAPTCHA.
 
 ### A13 — `docker compose up` mai verificato end-to-end
-Bloccato da Docker non installato sulla macchina di sviluppo. Verifica
-statica fatta e immagine pinnata (`python:3.11-slim-trixie`), ma build,
-`ffmpeg`/`ffprobe` dentro il container e `/health` non sono mai stati provati
-per davvero. Conta perché `render.yaml` con `runtime: docker` è l'unica cosa
-che rende vero `MAX_VIDEO_DURATION_SECONDS` in produzione. ~10 minuti una
-volta installato Docker.
+Bloccato da Docker non installato sulla macchina di sviluppo. Verifica statica
+fatta e immagine pinnata (`python:3.11-slim-trixie`), ma build,
+`ffmpeg`/`ffprobe` nel container e `/health` non sono mai stati provati. Conta
+perché `render.yaml` con `runtime: docker` è l'unica cosa che rende vero
+`MAX_VIDEO_DURATION_SECONDS` in produzione. ~10 minuti con Docker installato.
 
 ### Review di sicurezza della PR #7 — due voci su cinque ancora aperte
-**Tre chiuse dalla PR #12** (25 agosto 2026): `checked_at` troncato alla
-finestra del TTL, il passthrough che riusa `assert_public_target`, il log delle
-query non scopate a `DEBUG` sui percorsi di routine. L'elenco originale sta in
-`docs/archive/PROGRESS-2026-08-15.md`, che le dà ancora tutte per aperte: è un
-archivio. Restano:
+**Tre chiuse dalla PR #12** (25 agosto 2026); il dettaglio è nella PR. L'elenco
+originale sta in `docs/archive/PROGRESS-2026-08-15.md`, che le dà ancora tutte
+per aperte: è un archivio. Restano:
 
 1. **`is_private` fail-open** quando l'actor non espone il campo:
    `is_private=bool(privato)` (`apify_service.py:269`) è invariato dalla PR #7.
@@ -106,10 +98,9 @@ archivio. Restano:
    dello stesso canale sono due righe e due unità di quota.
 
 ### A9, punto 2 — i link brevi (`vm.tiktok.com/...`) non sono risolti
-Deliberato, priorità bassa: risolverli con una `HEAD` metterebbe una chiamata
-di rete nel percorso della cache key. La via migliore — ri-chiavare dopo lo
-scraping, che già risolve il link — tocca `perform_analysis` e il lock: è un
-intervento a sé.
+Deliberato, priorità bassa: una `HEAD` metterebbe una chiamata di rete nel
+percorso della cache key. La via migliore — ri-chiavare dopo lo scraping, che il
+link lo risolve già — tocca `perform_analysis` e il lock: intervento a sé.
 
 ### Confine del giorno delle quote — UTC per configurazione, non per codice
 Deliberato, priorità bassa. I tre trigger di quota (`0008`, `0010`, `0011`) usano
@@ -129,4 +120,11 @@ passthrough (`:150-174`), dove nessun URL scaricabile gli serve.
 
 Già corretta due volte sul codice reale: non riattribuire a Instagram la
 distinzione passthrough/fallback, che è solo di YouTube.
+
+### Il frontend non ha un test runner
+`frontend/package.json` ha solo `dev`, `build`, `start`, `lint`. La logica di
+`auth-form.tsx` — `isRegister`, le guardie sul captcha — non ha copertura
+automatica: una regressione lì non la becca né `tsc` né `next build`, solo un
+utente reale che non riesce a entrare. È esattamente come è nato il difetto
+chiuso dalla PR #15.
 

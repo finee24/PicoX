@@ -49,6 +49,11 @@ function translateAuthError(message: string): string {
   if (normalized.includes("rate limit") || normalized.includes("too many requests")) {
     return "Troppi tentativi. Attendi qualche minuto e riprova.";
   }
+  if (normalized.includes("captcha")) {
+    // Il testo di GoTrue («request disallowed (no captcha_token found)») è una
+    // descrizione della nostra configurazione, non un'istruzione per chi legge.
+    return "Verifica antispam non superata. Attendi che si completi qui sotto e riprova.";
+  }
   if (normalized.includes("fetch") || normalized.includes("network")) {
     return "Impossibile raggiungere Supabase. Verifica la connessione.";
   }
@@ -64,8 +69,22 @@ export function AuthForm({ mode, redirectTo, expired }: AuthFormProps) {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [confirmationSent, setConfirmationSent] = useState(false);
-  // Solo la registrazione ha il captcha: l'accesso e il recupero password non
-  // creano account, quindi non alimentano il vettore Sybil della voce A4.
+  // Il captcha vale per **ogni** percorso di autenticazione, non solo per la
+  // registrazione.
+  //
+  // La versione precedente lo montava solo qui, con questo argomento: l'accesso
+  // non crea account, quindi non alimenta il vettore Sybil della voce A4. Giusto
+  // sul rischio, sbagliato sul meccanismo — la protezione di Supabase Auth si
+  // abilita **per progetto, non per endpoint**, quindi accenderla per il signup
+  // la impone anche a `signInWithPassword`. Senza token GoTrue rifiuta con
+  // «request disallowed (no captcha_token found)», e l'accesso diventa
+  // impossibile per tutti.
+  //
+  // Non se n'era accorto nessuno perché l'unica sessione mai creata veniva
+  // dall'accesso automatico che segue la registrazione, che il token lo manda.
+  // Lo stesso varrà per il recupero password il giorno in cui esisterà: oggi
+  // non c'è alcun `resetPasswordForEmail` nel progetto, e va scritto con il
+  // token fin dalla prima riga invece di aggiungercelo dopo.
   const [captchaToken, setCaptchaToken] = useState<string | null>(null);
   const turnstileRef = useRef<TurnstileHandle>(null);
 
@@ -76,7 +95,7 @@ export function AuthForm({ mode, redirectTo, expired }: AuthFormProps) {
     // Fermarsi qui invece di lasciar partire la richiesta: senza token Supabase
     // risponderebbe comunque con un errore di captcha, ma tradotto per l'utente
     // suonerebbe come un guasto invece che come "manca un passaggio".
-    if (isRegister && !captchaToken) {
+    if (!captchaToken) {
       setError("Completa la verifica antispam qui sotto per continuare.");
       return;
     }
@@ -114,6 +133,10 @@ export function AuthForm({ mode, redirectTo, expired }: AuthFormProps) {
         const { error: signInError } = await supabase.auth.signInWithPassword({
           email,
           password,
+          // Stessa forma del signup qui sopra, e verificata sugli stessi tipi:
+          // `SignInWithPasswordCredentials` di @supabase/auth-js 2.112.2
+          // dichiara `options.captchaToken`.
+          options: { captchaToken: captchaToken ?? undefined },
         });
 
         if (signInError) {
@@ -142,9 +165,7 @@ export function AuthForm({ mode, redirectTo, expired }: AuthFormProps) {
       // volta sola: senza reset il secondo invio ne manderebbe uno gia' speso e
       // Supabase lo rifiuterebbe, mentre all'utente il widget resterebbe
       // spuntato di verde — un fallimento senza nulla che lo spieghi.
-      if (isRegister) {
-        turnstileRef.current?.reset();
-      }
+      turnstileRef.current?.reset();
     }
   }
 
@@ -211,9 +232,7 @@ export function AuthForm({ mode, redirectTo, expired }: AuthFormProps) {
         />
       </div>
 
-      {isRegister && (
-        <TurnstileWidget ref={turnstileRef} onToken={setCaptchaToken} />
-      )}
+      <TurnstileWidget ref={turnstileRef} onToken={setCaptchaToken} />
 
       {error && (
         <p

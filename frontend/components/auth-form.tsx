@@ -190,8 +190,15 @@ export function AuthForm({ mode, redirectTo, expired }: AuthFormProps) {
     );
   }
 
+  // `method="post"` benché `handleSubmit` faccia sempre `preventDefault()`:
+  // conta solo **prima dell'idratazione**, quando il gestore non è ancora
+  // attaccato e un invio nativo parte davvero. Senza `method` il default è GET,
+  // quindi `email` e `password` finirebbero nella query string — cioè nella
+  // barra indirizzi, nella cronologia e nei log di accesso. Con POST la stessa
+  // richiesta prende un 405 dalla page route: visibile e innocuo. A idratazione
+  // avvenuta non cambia nulla.
   return (
-    <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+    <form method="post" onSubmit={handleSubmit} className="space-y-4" noValidate>
       {expired && !error && (
         <p
           role="status"

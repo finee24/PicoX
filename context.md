@@ -20,31 +20,35 @@ successiva.
 
 ## Prima di fidarti di questo file
 
-L'ho ricostruito da `PROGRESS.md` (ora archiviato in
-`docs/archive/PROGRESS-2026-08-15.md`) e `SECURITY_AUDIT.md`, che si sono
-dimostrati non affidabili al 100% sulla recency.
-Verifica quanto sotto contro il repo vero prima di agire:
-
-```bash
-git log --oneline -20
-git status
-gh pr list
-```
+Ricostruito da `PROGRESS.md` (ora in `docs/archive/PROGRESS-2026-08-15.md`) e
+`SECURITY_AUDIT.md`, che si sono dimostrati non affidabili sulla recency.
+Verifica quanto sotto contro il repo vero prima di agire: `git log --oneline
+-20`, `git status`, `gh pr list`.
 
 **La migration `0011` (tetto globale di spesa) è applicata in produzione
 (`jaimkiagtolxbkftjapx`) dal 22 agosto 2026 — non riapplicarla.** Il verbale
 della verifica sta nel commit e nella migration. `daily_cap_usd` è a `100.00`.
+
+## Prima del primo deploy
+
+Quattro prerequisiti diventano bloccanti **insieme**, e nessuno si rimanda al
+giorno dopo: `CRON_ENABLED` (i due prerequisiti sono fatti, manca lo scheduler —
+sezione qui sotto), un **SMTP proprio** (necessario, ma toglie la protezione
+data dalla quota email: vedi A4), una **sitekey Turnstile reale** del progetto
+Cloudflare senza la quale `next build` fallisce in produzione (PR #16), e
+**A13** se il deploy usa `runtime: docker` — quel runtime è l'unica cosa che
+rende reale `MAX_VIDEO_DURATION_SECONDS`, e `docker compose up` non è mai stato
+verificato end-to-end.
 
 ## Prima di accendere il cron
 
 **`CRON_ENABLED` è `false` (`backend/render.yaml:73`), spento per scelta dal
 22 agosto 2026 — non dimenticato.** Tecnicamente non manca nulla: PR sul cron
 mergiata (`ee547a2`), migration `0005` applicata dal 15 agosto. Non si spende
-finché la data di lancio non è fissata: il cron richiede un deploy Render
-attivo, e quel deploy una carta. Quando si riprende, l'ordine è quello di
+finché la data di lancio non è fissata. Quando si riprende, l'ordine è quello di
 `backend/app/cron_config.md` — prima lo scheduler (passo 2, l'unico da fare),
-**poi** `CRON_ENABLED=true`. Accenderlo prima non avvia nulla: apre soltanto
-`POST /api/v1/cron/check-updates` a chi ha `CRON_SECRET`.
+**poi** `CRON_ENABLED=true`. Accenderlo prima non avvia nulla: apre solo
+l'endpoint a chi ha `CRON_SECRET`.
 
 **Il tetto globale (`0011`) non copre il cron**: scrive fuori da
 `analysis_events` per scelta della `0008` — `conta_quota=False` (`cron.py:198`)
@@ -70,32 +74,27 @@ attivo (`apify_results_per_creator`).
    chi crea abbastanza account esaurisce il tetto e ferma il servizio.
 
 **L'SMTP condiviso di Supabase permette solo 2 email/ora** (campo fisso in
-dashboard, non modificabile): è un **prerequisito** di lancio, non
-un'ottimizzazione. E configurarlo toglie l'altra barriera Sybil di fatto —
-quella quota — senza alcun segnale, lasciando il solo CAPTCHA.
+dashboard, non modificabile). Configurarne uno proprio toglie l'altra barriera
+Sybil di fatto — quella quota — senza alcun segnale, lasciando il solo CAPTCHA.
 
 ### A13 — `docker compose up` mai verificato end-to-end
-Bloccato da Docker non installato sulla macchina di sviluppo. Verifica statica
-fatta e immagine pinnata (`python:3.11-slim-trixie`), ma build,
-`ffmpeg`/`ffprobe` nel container e `/health` non sono mai stati provati. Conta
-perché `render.yaml` con `runtime: docker` è l'unica cosa che rende vero
-`MAX_VIDEO_DURATION_SECONDS` in produzione. ~10 minuti con Docker installato.
+Bloccato da Docker non installato sulla macchina di sviluppo, ~10 minuti una
+volta che c'è. Verifica statica fatta e immagine pinnata
+(`python:3.11-slim-trixie`), ma build, `ffmpeg`/`ffprobe` nel container e
+`/health` non sono mai stati provati. Perché conta, vedi sopra.
 
 ### Review di sicurezza della PR #7 — due voci su cinque ancora aperte
-**Tre chiuse dalla PR #12** (25 agosto 2026); il dettaglio è nella PR. L'elenco
-originale sta in `docs/archive/PROGRESS-2026-08-15.md`, che le dà ancora tutte
-per aperte: è un archivio. Restano:
+**Tre chiuse dalla PR #12**; il dettaglio è nella PR. L'elenco originale sta
+nell'archivio citato sopra, che le dà ancora tutte per aperte. Restano:
 
 1. **`is_private` fail-open** quando l'actor non espone il campo:
    `is_private=bool(privato)` (`apify_service.py:269`) è invariato dalla PR #7.
-   **PR #13 mergiata** (25 agosto 2026, `5878c75`): copre solo il caso *già
-   noto come privato* — blocco UI e guardia su `POST /creators` che legge la
-   cache. Il fail-open qui sopra **resta aperto**.
-2. **L'handle canonico YouTube** — `customUrl` ora passa da `clean_username`,
-   con ripiego sulla forma *cercata* quando non valida (PR #14). Resta aperta
-   solo la **decisione 1**: sotto quale chiave scrivere la riga di cache
-   (`creator_validation.py:317`). Ridisegno a sé — finché non si fa, due forme
-   dello stesso canale sono due righe e due unità di quota.
+   La PR #13 ha chiuso solo il caso *già noto come privato*; questo **resta
+   aperto**.
+2. **L'handle canonico YouTube** — la PR #14 ha chiuso la validazione del
+   `customUrl`. Resta la **decisione 1**: sotto quale chiave scrivere la riga di
+   cache (`creator_validation.py:317`). Ridisegno a sé — finché non si fa, due
+   forme dello stesso canale sono due righe e due unità di quota.
 
 ### A9, punto 2 — i link brevi (`vm.tiktok.com/...`) non sono risolti
 Deliberato, priorità bassa: una `HEAD` metterebbe una chiamata di rete nel
@@ -109,7 +108,7 @@ perché il codice lo garantisca. Se mai li si allinea esplicitamente vanno fatti
 tutti e tre insieme — cambiarne uno solo creerebbe due "giorni" nello stesso
 database.
 
-### Il parametro Apify mancante: Instagram mai verificato, YouTube sul fallback
+### Il parametro Apify mancante: Instagram, e il ramo di fallback YouTube
 
 `_single_video_input` passa `shouldDownloadVideos: true` solo per TikTok (dove
 serviva: senza, l'actor non restituiva alcun URL scaricabile). Mai controllato
@@ -118,8 +117,8 @@ passthrough (`content_scraper.py:198-199`), e il **solo ramo di fallback ad
 Apify** di YouTube (`:177-186`) — non tutto YouTube, che di norma va in
 passthrough (`:150-174`), dove nessun URL scaricabile gli serve.
 
-Già corretta due volte sul codice reale: non riattribuire a Instagram la
-distinzione passthrough/fallback, che è solo di YouTube.
+Già corretta due volte: la distinzione passthrough/fallback è solo di YouTube,
+non riattribuirla a Instagram.
 
 ### Il frontend non ha un test runner
 `frontend/package.json` ha solo `dev`, `build`, `start`, `lint`. La logica di

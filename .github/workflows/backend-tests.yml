@@ -123,7 +123,12 @@ jobs:
           NEXT_PUBLIC_SUPABASE_URL: https://esempio.supabase.co
           NEXT_PUBLIC_SUPABASE_ANON_KEY: chiave-anon-fittizia-per-il-build
           NEXT_PUBLIC_BACKEND_URL: http://localhost:8000
-          # Sitekey di test pubblica di Cloudflare: qui serve solo a non far
-          # fallire `lib/env.ts`, il build non contatta Turnstile.
-          NEXT_PUBLIC_TURNSTILE_SITE_KEY: 1x00000000000000000000AA
+          # Segnaposto, NON una sitekey di prova di Cloudflare: qui serve solo
+          # a non far fallire `required()` in `lib/env.ts`, e il build non
+          # contatta mai Turnstile. Una sitekey di prova vera farebbe scattare
+          # `vietaSitekeyDiProvaInProduzione`, perche' `next build` imposta da
+          # se' NODE_ENV=production: la CI verrebbe bloccata dalla guardia che
+          # esiste per bloccare i deploy. Stessa scelta gia' fatta per la
+          # chiave anon qui sopra.
+          NEXT_PUBLIC_TURNSTILE_SITE_KEY: ci-placeholder-non-una-chiave-vera
         run: npm run build

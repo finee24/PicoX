@@ -405,3 +405,84 @@ la quota in un minuto ed e' quello che e' successo.
 **Non fidarsi di una risposta HTTP per inferire quale controllo l'ha prodotta**
 quando un limitatore a monte puo' rispondere per primo: quello che sembra un
 esito e' una precedenza.
+
+---
+
+### La sessione cade dopo il login
+
+**Quando/dove si e' visto:** 26 agosto 2026, sul progetto reale. Dashboard
+funzionante all'01:02, redirect a `/login` alle 11:20, e da li' in poi
+impossibile rientrare: il form accettava le credenziali e tornava al punto di
+partenza.
+
+**Ipotesi scartate, e perche' — tre in fila, e ognuna spiegava meno della
+precedente:**
+
+1. *"La durata del JWT e' stata accorciata da qualche configurazione"* — un'ora
+   sembrava poco. Falsa su tre piani: il repo non configura nulla (non esiste
+   `supabase/config.toml`), il refresh in `proxy.ts` e' il pattern canonico di
+   `@supabase/ssr` con `getAll`/`setAll` e `getUser()`, e soprattutto la
+   sessione **era durata piu' di tre ore** di uso reale — accesso alle 22:03,
+   dashboard viva all'01:02 — cosa possibile solo se il refresh funzionava.
+   L'ipotesi nasceva da un errore di misura mio: avevo letto come «poco piu' di
+   un'ora» la distanza fra due miei controlli nella stessa conversazione, che
+   sull'orologio erano a **10 ore e mezza**. Due controlli consecutivi per chi
+   indaga non sono due istanti vicini.
+
+2. *"La sessione e' stata revocata lato server"* — sostenuta da dati veri:
+   `auth.sessions` a zero righe, `auth.refresh_tokens` a zero,
+   `auth.users.updated_at` mosso alle 11:20. Un token semplicemente **scaduto**
+   lascerebbe in piedi la riga e il refresh token, quindi «terminata, non
+   scaduta» era corretto. Sbagliato era considerarlo la spiegazione: diceva
+   perche' la sessione fosse sparita, non perche' non se ne potesse creare
+   un'altra. Ha spiegato il sintomo e lasciato intatto il problema.
+
+3. Solo guardando lo **schermo** invece del database e' comparsa la risposta:
+   il form mostrava `captcha protection: request disallowed (no captcha_token
+   found)`. Il login non stava cadendo — **non poteva riuscire affatto**.
+
+**Causa reale:** la protezione CAPTCHA di Supabase Auth si abilita **per
+progetto, non per endpoint**. Il widget Turnstile era montato solo sul form di
+registrazione, e `signInWithPassword` non mandava alcun `captchaToken`: GoTrue
+rifiutava ogni accesso. L'account era irraggiungibile per chiunque, non solo per
+noi.
+
+Perche' nessuno se n'era accorto, in due righe:
+
+```
+auth.users.created_at      : 2026-08-25 20:03:12+00
+auth.users.last_sign_in_at : 2026-08-25 20:03:23+00     <- 11 secondi dopo
+```
+
+Undici secondi: e' l'accesso automatico che segue la **registrazione**, l'unico
+percorso che il token lo manda. Su quel progetto un login vero non era mai stato
+completato, quindi il difetto non aveva modo di manifestarsi finche' la sessione
+nata col signup e' rimasta viva.
+
+**Fix:** PR #15. Il widget si monta su entrambi i form, la guardia di prontezza
+e il reset dopo ogni tentativo valgono per entrambi, e il token passa anche a
+`signInWithPassword` (`options.captchaToken`, verificato sui tipi di
+`@supabase/auth-js` 2.112.2 installato). Nella stessa PR il `method="post"` sul
+form, finding MEDIUM della security review: senza, prima dell'idratazione un
+invio nativo partiva in GET con `email` e `password` nella query string.
+
+Verificato end-to-end **con la protezione CAPTCHA ancora attiva**, non
+disattivandola: `auth.sessions.created_at` e `auth.users.last_sign_in_at`
+coincidono a meno di due millisecondi, quindi la sessione e' stata creata da
+quell'accesso e non ereditata.
+
+**La lezione riusabile, che non e' sul CAPTCHA:** un test end-to-end che copre
+**un solo percorso** su una protezione attivata a livello di **progetto** lascia
+gli altri percorsi non provati per definizione. Non e' un errore di esecuzione
+del test, e' un errore di **perimetro**. Il CAPTCHA era stato provato "nei due
+versi" — senza token rifiuta, con token passa — e quella coppia sembrava
+esaustiva: era esaustiva sul signup e cieca su tutto il resto. Quando si accende
+un interruttore globale, il perimetro della prova e' l'insieme di cio' che
+quell'interruttore tocca, non l'insieme di cio' che si e' appena scritto.
+
+Un corollario, annotato in `context.md`: il frontend non ha alcun test runner,
+quindi nulla di automatico avrebbe intercettato la regressione. L'unico
+rilevatore disponibile era un utente che prova ad accedere.
+
+Pointer: PR #15, `frontend/components/auth-form.tsx`; voce «Il frontend non ha
+un test runner» in `context.md`.

@@ -49,8 +49,8 @@ up` non è mai stato verificato end-to-end.
 **`CRON_ENABLED` è `false` (`backend/render.yaml:73`), spento per scelta dal
 22 agosto 2026 — non dimenticato.** Non manca nulla: PR sul cron mergiata
 (`ee547a2`), migration `0005` applicata dal 15 agosto. Non si spende finché la
-data di lancio
-non è fissata. L'ordine è in `backend/app/cron_config.md` — prima lo scheduler
+data di lancio non è fissata. L'ordine è in `backend/app/cron_config.md` —
+prima lo scheduler
 (passo 2, l'unico da fare), **poi** `CRON_ENABLED=true`. Accenderlo prima non
 avvia nulla: apre solo l'endpoint a chi ha `CRON_SECRET`.
 
@@ -120,9 +120,9 @@ nello stesso database.
 `503 gemini_unavailable`** fra il 26 e il 27 agosto 2026. Il 27, stesso modello
 e stessa chiave, `@geopop/video/7522889737288305942` è riuscito al primo colpo
 in due minuti: non è Gemini, né la chiave API, né la quota del progetto Google.
-Ipotesi **non verificata**: la
-dimensione (11,3 MB / 86s) o una proprietà di quel file. **Non riprovare su
-quel video** finché la causa non è isolata — è quota spesa su un esito noto.
+Ipotesi **non verificata**: la dimensione (11,3 MB / 86s) o una proprietà di
+quel file. **Non riprovare su quel video** finché la causa non è isolata — è
+quota spesa su un esito noto.
 
 Dallo stesso giro, non indagato: `POST /creators/validate` → **503** su
 `@geopop` mentre l'analisi riusciva, senza righe nuove in

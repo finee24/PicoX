@@ -115,14 +115,26 @@ della sessione Supabase, **non perché il codice lo garantisca**. Se mai li si
 allinea, vanno fatti tutti e tre insieme — uno solo creerebbe due "giorni"
 nello stesso database.
 
-### L'analisi fallisce su un video, non su Gemini
-`@ingegneri_in_borsa/video/7677930225237314849`: **cinque tentativi, cinque
-`503 gemini_unavailable`** fra il 26 e il 27 agosto 2026. Il 27, stesso modello
-e stessa chiave, `@geopop/video/7522889737288305942` è riuscito al primo colpo
-in due minuti: non è Gemini, né la chiave API, né la quota del progetto Google.
-Ipotesi **non verificata**: la dimensione (11,3 MB / 86s) o una proprietà di
-quel file. **Non riprovare su quel video** finché la causa non è isolata — è
-quota spesa su un esito noto.
+### Il `503` di Gemini è intermittente, non legato al video
+`@ingegneri_in_borsa/video/7677930225237314849` aveva **cinque
+`503 gemini_unavailable` su cinque** (26-27 agosto) e sembrava un problema
+di quel file. **Non lo è**: isolando Gemini da Apify e da `perform_analysis` —
+solo upload e `generate_content` — è stato analizzato in **63,8s** senza un
+retry.
+
+Escluse **dimensione e proprietà del file**: il controllo che funziona è più
+**grande** (18,84 MB / 154s contro 11,28 MB / 86s). Il `503` è
+**intermittente**: lo stesso script, sugli stessi file, ne ha preso uno **dieci
+minuti prima** di riuscire, senza modifiche.
+
+**Non spiegato** perché i cinque fallimenti si siano concentrati lì:
+coincidenza di finestre o correlazione vera non sono distinguibili con le
+osservazioni attuali. **Non isolata**: `perform_analysis` costruisce un
+`AnalysisContext` che allunga il prompt, la prova isolata no.
+
+**Nessun motivo per evitare di riprovare**: non c'è più un esito noto, c'è un
+servizio intermittente. La prova si rifà con `GeminiService.analyze_video` su un
+file scaricato, fuori da `perform_analysis`: non consuma quota.
 
 Dallo stesso giro, non indagato: `POST /creators/validate` → **503** su
 `@geopop` mentre l'analisi riusciva, senza righe nuove in

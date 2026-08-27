@@ -182,6 +182,21 @@ calcolo del caso peggiore (180+120+120+300×3×2 = 2220) è già scritto come
 commento vicino a `analysis_lock_ttl_seconds` in `config.py`, non serve
 rifarlo a mano.
 
+**Ipotesi rafforzata il 28 agosto 2026, non ancora dimostrata in modo
+definitivo.** Un `429 RESOURCE_EXHAUSTED` sullo stesso progetto ha rivelato il
+tetto di **20 richieste al giorno per modello** e confermato il **piano
+gratuito** (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`). Il traffico
+gratuito servito sulla capacità residua spiegherebbe l'intermittenza osservata
+nei `503` — più plausibile di un guasto generico del servizio, ma resta
+**un'inferenza**: `503` e `429` sono errori distinti, e per esserne certi
+servirebbe rifare la prova con il billing attivo.
+
+Nello stesso messaggio d'errore, un dettaglio che qui cambia la lettura di una
+misura: `gemini-flash-latest` risolve oggi a **`gemini-3.7-flash`**. Il «5/6
+successi» qui sopra è del 15 agosto e riguarda il modello a cui l'alias puntava
+allora — non è confrontabile con le osservazioni di fine agosto. Il tetto come
+limite di prodotto sta in `context.md`.
+
 ### `check_env.py` non trova le variabili / crasha proprio quando c'è un errore da segnalare
 
 **Quando/dove si è visto:** eseguito da `backend/` come da README, riportava

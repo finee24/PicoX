@@ -29,8 +29,8 @@ Ricostruito da `PROGRESS.md` (ora in `docs/archive/PROGRESS-2026-08-15.md`) e
 prima di agire: `git log --oneline -20`, `git status`, `gh pr list`.
 
 **La migration `0011` (tetto globale di spesa) è applicata in produzione
-(`jaimkiagtolxbkftjapx`) dal 22 agosto 2026 — non riapplicarla.** Il verbale sta
-nel commit e nella migration. `daily_cap_usd` è a `100.00`.
+(`jaimkiagtolxbkftjapx`) dal 22 agosto 2026 — non riapplicarla.** `daily_cap_usd`
+è a `100.00`.
 
 ## Prima del primo deploy
 
@@ -77,6 +77,14 @@ accoda fino a 10 analisi per creator attivo (`apify_results_per_creator`).
 dashboard, non modificabile). Configurarne uno proprio toglie quella barriera
 senza alcun segnale, lasciando il solo CAPTCHA.
 
+### Gemini è sul piano gratuito: 20 analisi al giorno in tutto
+Confermato il 28 agosto 2026 (badge «Livello gratuito» in AI Studio). **20
+richieste al giorno per modello, sull'intero progetto** — non per utente
+(`GenerateRequestsPerDayPerProjectPerModel-FreeTier`) — azzerate a mezzanotte
+Pacific, **verso le 09:00 italiane**. A costo zero è questo il limite vero del
+prodotto: 20 analisi al giorno in tutto, fra tutti gli utenti e tutte le prove.
+Non un problema tecnico, un limite del piano.
+
 ### A13 — `docker compose up` mai verificato end-to-end
 Bloccato da Docker non installato in locale, ~10 minuti una volta che c'è.
 Verifica statica fatta e immagine pinnata (`python:3.11-slim-trixie`), ma
@@ -97,18 +105,11 @@ chiavi. Finché resta, due forme dello stesso canale costano due righe di cache
 e due unità di quota. Ridisegno a sé: tocca `_scrivi_cache`, `_leggi_cache`,
 `cached_validation` e la dedup.
 
-### A9, punto 2 — i link brevi (`vm.tiktok.com/...`) non sono risolti
-Deliberato, priorità bassa: risolverli con una `HEAD` metterebbe una chiamata di
-rete nel percorso della cache key. La via migliore — ri-chiavare dopo lo
-scraping, che il link lo risolve già — tocca `perform_analysis` e il lock:
-intervento a sé.
-
 ### Confine del giorno delle quote — UTC di fatto, non per codice
-Deliberato, priorità bassa. I tre trigger di quota (`0008`, `0010`, `0011`)
-usano `date_trunc('day', now())`: UTC perché è il default della sessione
-Supabase, **non perché il codice lo garantisca**. Se mai li si allinea, vanno
-fatti tutti e tre insieme — uno solo creerebbe due "giorni" nello stesso
-database.
+Deliberato, priorità bassa; documentato nella `0008` (commento su
+`analysis_events.created_at` e sul trigger). Qui resta l'avvertenza: se mai lo
+si allinea a un fuso, i tre trigger (`0008`, `0010`, `0011`) vanno fatti
+**insieme** — uno solo creerebbe due "giorni" nello stesso database.
 
 ### Il `503` di Gemini è intermittente, non legato al video
 `@ingegneri_in_borsa/video/7677930225237314849` aveva **cinque
@@ -127,14 +128,14 @@ durato oltre **251s**: anche 6 tentativi col backoff più largo restano a ~242s,
 e già 4 sfora il budget del lock (`analysis_lock_ttl_seconds`). È la leva
 sbagliata per la scala del guasto.
 
-**Non spiegato** perché i cinque fallimenti si siano concentrati lì:
-coincidenza di finestre o correlazione vera non sono distinguibili con le
-osservazioni attuali. **Non isolata**: `perform_analysis` costruisce un
-`AnalysisContext` che allunga il prompt, la prova isolata no.
+**Non spiegato** perché i cinque fallimenti si siano concentrati lì; il piano
+gratuito qui sopra è il candidato più forte. **Non isolata**:
+`perform_analysis` costruisce un `AnalysisContext` che allunga il prompt, la
+prova isolata no.
 
 **Nessun motivo per evitare di riprovare**: non c'è più un esito noto, c'è un
-servizio intermittente. La prova si rifà con `GeminiService.analyze_video` su un
-file scaricato, fuori da `perform_analysis`: non consuma quota.
+servizio intermittente. La prova si rifà con `GeminiService.analyze_video` fuori
+da `perform_analysis`: non tocca la quota di Picox, ma sì quella di Google.
 
 Dallo stesso giro, non indagato: `POST /creators/validate` → **503** su
 `@geopop` mentre l'analisi riusciva, senza righe nuove in

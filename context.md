@@ -13,10 +13,14 @@ secondo PROGRESS.md: se una voce qui compie settimane senza essere toccata,
 è un segnale che va chiusa o rivista, non solo riletta.
 
 **Prima di aggiungere una voce, controlla la lunghezza** (metrica dell'hook:
-`read_text` utf-8, poi `len`). Se l'aggiunta porta sopra i 7.000 caratteri,
-comprimi o togli qualcosa di equivalente **nella stessa modifica** — non
-lasciare che il file scivoli sopra soglia e se ne accorga solo la sessione
-successiva.
+`read_text` utf-8, poi `len`). Soglia operativa **8.000 caratteri**: oltre,
+comprimi o togli qualcosa di equivalente **nella stessa modifica**.
+
+Il tetto vero è **9.000** (`session_start_context.py:34`), oltre il quale
+l'hook **tronca** e la sessione successiva riceve un file mutilato senza
+saperlo. Gli 8.000 lasciano mille caratteri di margine. Se comprimere inizia a
+costare riferimenti `file:riga` invece di ridondanze, il file non è lungo: ha
+una voce che andava chiusa, o una che sta meglio come commento nel codice.
 
 ## Prima di fidarti di questo file
 
@@ -32,23 +36,23 @@ della verifica sta nel commit e nella migration. `daily_cap_usd` è a `100.00`.
 ## Prima del primo deploy
 
 Quattro prerequisiti diventano bloccanti **insieme**, e nessuno si rimanda al
-giorno dopo: `CRON_ENABLED` (i due prerequisiti sono fatti, manca lo scheduler —
-sezione qui sotto), un **SMTP proprio** (necessario, ma toglie la protezione
-data dalla quota email: vedi A4), una **sitekey Turnstile reale** del progetto
-Cloudflare senza la quale `next build` fallisce in produzione (PR #16), e
-**A13** se il deploy usa `runtime: docker` — quel runtime è l'unica cosa che
-rende reale `MAX_VIDEO_DURATION_SECONDS`, e `docker compose up` non è mai stato
-verificato end-to-end.
+giorno dopo: `CRON_ENABLED` (i due prerequisiti sono fatti, manca solo lo
+scheduler — sezione qui sotto), un **SMTP proprio** (necessario, ma toglie la
+protezione di fatto data dalla quota email: vedi A4), una **sitekey Turnstile
+reale** del progetto Cloudflare, senza la quale `next build` fallisce in
+produzione (PR #16), e **A13** se il deploy usa `runtime: docker` — quel runtime
+è l'unica cosa che rende reale `MAX_VIDEO_DURATION_SECONDS`, e `docker compose
+up` non è mai stato verificato end-to-end.
 
 ## Prima di accendere il cron
 
 **`CRON_ENABLED` è `false` (`backend/render.yaml:73`), spento per scelta dal
-22 agosto 2026 — non dimenticato.** Tecnicamente non manca nulla: PR sul cron
-mergiata (`ee547a2`), migration `0005` applicata dal 15 agosto. Non si spende
-finché la data di lancio non è fissata. Quando si riprende, l'ordine è quello di
-`backend/app/cron_config.md` — prima lo scheduler (passo 2, l'unico da fare),
-**poi** `CRON_ENABLED=true`. Accenderlo prima non avvia nulla: apre solo
-l'endpoint a chi ha `CRON_SECRET`.
+22 agosto 2026 — non dimenticato.** Non manca nulla: PR sul cron mergiata
+(`ee547a2`), migration `0005` applicata dal 15 agosto. Non si spende finché la
+data di lancio
+non è fissata. L'ordine è in `backend/app/cron_config.md` — prima lo scheduler
+(passo 2, l'unico da fare), **poi** `CRON_ENABLED=true`. Accenderlo prima non
+avvia nulla: apre solo l'endpoint a chi ha `CRON_SECRET`.
 
 **Il tetto globale (`0011`) non copre il cron**: scrive fuori da
 `analysis_events` per scelta della `0008` — `conta_quota=False` (`cron.py:198`)
@@ -62,11 +66,11 @@ attivo (`apify_results_per_creator`).
 ## Task attivi
 
 ### A4 — rischio Sybil (più account)
-**Due opzioni su quattro sono fatte** — dettaglio in `SECURITY_AUDIT.md`, A4:
+**Due su quattro fatte** — dettaglio in `SECURITY_AUDIT.md`, A4:
 
 1. ~~CAPTCHA al signup~~ — **fatta** (24 agosto), ma provata **solo sul
-   signup**: il login era rotto, chiuso dalla PR #15. **In produzione servono
-   chiavi reali**: ora ci sono quelle di test, che passano sempre.
+   signup**: il login era rotto, chiuso dalla PR #15. Le chiavi in uso sono
+   quelle di test (vedi i prerequisiti di deploy).
 2. Limite di registrazioni per IP o dominio email — aperta
 3. Verifica della carta anche sul piano gratuito — aperta
 4. ~~Tetto globale di spesa~~ — **fatta** (22 agosto): `0011`, `PX004` → `409
@@ -81,44 +85,48 @@ Sybil di fatto — quella quota — senza alcun segnale, lasciando il solo CAPTC
 Bloccato da Docker non installato sulla macchina di sviluppo, ~10 minuti una
 volta che c'è. Verifica statica fatta e immagine pinnata
 (`python:3.11-slim-trixie`), ma build, `ffmpeg`/`ffprobe` nel container e
-`/health` non sono mai stati provati. Perché conta, vedi sopra.
+`/health` non sono mai stati provati. Perché conta: è il quarto prerequisito di
+deploy qui sopra.
 
-### Review di sicurezza della PR #7 — due voci su cinque ancora aperte
-**Tre chiuse dalla PR #12**; il dettaglio è nella PR. L'elenco originale sta
-nell'archivio citato sopra, che le dà ancora tutte per aperte. Restano:
+### `is_private` fail-open quando l'actor non espone il campo
+`is_private=bool(privato)` (`apify_service.py:269`) legge un campo **assente**
+come «non privato», ed è invariato dalla PR #7. La PR #13 (`5878c75`) ha chiuso
+solo il caso *già noto* come privato — blocco nell'interfaccia e guardia su
+`POST /creators` che legge la cache — non questo.
 
-1. **`is_private` fail-open** quando l'actor non espone il campo:
-   `is_private=bool(privato)` (`apify_service.py:269`) è invariato dalla PR #7.
-   La PR #13 ha chiuso solo il caso *già noto come privato*; questo **resta
-   aperto**.
-2. **L'handle canonico YouTube** — la PR #14 ha chiuso la validazione del
-   `customUrl`. Resta la **decisione 1**: sotto quale chiave scrivere la riga di
-   cache (`creator_validation.py:317`). Ridisegno a sé — finché non si fa, due
-   forme dello stesso canale sono due righe e due unità di quota.
+### La chiave della riga di cache delle validazioni
+`_scrivi_cache` indicizza la riga sulla forma **cercata**
+(`creator_validation.py:317`), mentre la risposta porta quella **canonica**: la
+PR #14 ha chiuso la validazione del `customUrl`, non la divergenza fra le due
+chiavi. Finché resta, due forme dello stesso canale costano due righe di cache
+e due unità di quota. Ridisegno a sé: tocca `_scrivi_cache`, `_leggi_cache`,
+`cached_validation` e la dedup.
 
 ### A9, punto 2 — i link brevi (`vm.tiktok.com/...`) non sono risolti
-Deliberato, priorità bassa: una `HEAD` metterebbe una chiamata di rete nel
-percorso della cache key. La via migliore — ri-chiavare dopo lo scraping, che il
-link lo risolve già — tocca `perform_analysis` e il lock: intervento a sé.
+Deliberato, priorità bassa: risolverli con una `HEAD` metterebbe una chiamata di
+rete nel percorso della cache key. La via migliore — ri-chiavare dopo lo
+scraping, che il link lo risolve già — tocca `perform_analysis` e il lock:
+intervento a sé.
 
-### Confine del giorno delle quote — UTC per configurazione, non per codice
+### Confine del giorno delle quote — UTC di fatto, non per codice
 Deliberato, priorità bassa. I tre trigger di quota (`0008`, `0010`, `0011`) usano
-`date_trunc('day', now())`: UTC perché è il default della sessione Supabase, non
-perché il codice lo garantisca. Se mai li si allinea esplicitamente vanno fatti
-tutti e tre insieme — cambiarne uno solo creerebbe due "giorni" nello stesso
-database.
+`date_trunc('day', now())` per il confine del giorno: UTC perché è il default
+della sessione Supabase, **non perché il codice lo garantisca**. Se mai li si
+allinea, vanno fatti tutti e tre insieme — uno solo creerebbe due "giorni"
+nello stesso database.
 
-### Il parametro Apify mancante: Instagram, e il ramo di fallback YouTube
+### L'analisi fallisce su un video, non su Gemini
+`@ingegneri_in_borsa/video/7677930225237314849`: **cinque tentativi, cinque
+`503 gemini_unavailable`** fra il 26 e il 27 agosto 2026. Il 27, stesso modello
+e stessa chiave, `@geopop/video/7522889737288305942` è riuscito al primo colpo
+in due minuti: non è Gemini, né la chiave API, né la quota del progetto Google.
+Ipotesi **non verificata**: la
+dimensione (11,3 MB / 86s) o una proprietà di quel file. **Non riprovare su
+quel video** finché la causa non è isolata — è quota spesa su un esito noto.
 
-`_single_video_input` passa `shouldDownloadVideos: true` solo per TikTok (dove
-serviva: senza, l'actor non restituiva alcun URL scaricabile). Mai controllato
-per lo stesso problema: **tutto** Instagram, che di lì passa sempre e non ha
-passthrough (`content_scraper.py:198-199`), e il **solo ramo di fallback ad
-Apify** di YouTube (`:177-186`) — non tutto YouTube, che di norma va in
-passthrough (`:150-174`), dove nessun URL scaricabile gli serve.
-
-Già corretta due volte: la distinzione passthrough/fallback è solo di YouTube,
-non riattribuirla a Instagram.
+Dallo stesso giro, non indagato: `POST /creators/validate` → **503** su
+`@geopop` mentre l'analisi riusciva, senza righe nuove in
+`creator_validations`. Se si ripresenta, merita una voce in `bug.md`.
 
 ### Il frontend non ha un test runner
 `frontend/package.json` ha solo `dev`, `build`, `start`, `lint`. La logica di

@@ -97,6 +97,36 @@ def da_video_scrapato(
     return ScraperResult(video_bytes_url=video.media_url, **comune)
 
 
+# =============================================================================
+# UN CONTROLLO MAI FATTO, SU DUE DEI TRE PERCORSI
+# =============================================================================
+# `ApifyService._single_video_input` passa `shouldDownloadVideos: true` **solo**
+# per TikTok, dove serviva davvero: senza quel flag l'actor non restituiva alcun
+# URL scaricabile, solo `webVideoUrl`, cioè la pagina HTML del post. Verificato
+# chiamando l'actor direttamente — vedi il commento accanto al flag.
+#
+# Gli altri due input non lo passano, e **non sono mai stati controllati per lo
+# stesso problema**. Non è una diagnosi: è l'assenza di una verifica, annotata
+# qui perché chi tocca questi percorsi ci passa per forza.
+#
+# - **Instagram**: `ApifyContentScraper.scrape` → `resolve_video` →
+#   `_single_video_input` è l'**unico** percorso che ha, non c'è passthrough.
+#   Quindi il dubbio riguarda **tutto** il suo utilizzo, non un sottoinsieme.
+# - **YouTube**: di norma va in passthrough (`YouTubeContentScraper.scrape`) e lì
+#   non gli serve alcun URL scaricabile — non è a rischio. Ma ha un **ramo di
+#   fallback ad Apify** quando la durata non è verificabile, ed è **quel ramo**,
+#   non tutto YouTube, a non essere mai stato controllato.
+#
+# Questa nota è già stata corretta due volte sul codice reale: la prima versione
+# dava YouTube per intero come a rischio, la seconda invertiva la struttura e
+# attribuiva a Instagram la distinzione passthrough/fallback, che è solo di
+# YouTube. Non riattribuirgliela una terza volta.
+#
+# (Veniva da `context.md`, dove era stato uno stato attivo per settimane senza
+# essere né verificato né chiuso. Sta meglio qui: è una cautela sul codice, non
+# un task.)
+
+
 class ApifyContentScraper:
     """Instagram e TikTok: entrambi passano da un actor e dai byte del file.
 
@@ -175,6 +205,10 @@ class YouTubeContentScraper:
 
         # Durata sconosciuta: il passthrough salterebbe il limite, quindi si
         # torna al percorso che lo applica davvero.
+        #
+        # È **questo** ramo — non tutto YouTube — quello che non è mai stato
+        # controllato per il parametro Apify mancante: vedi la nota in testa a
+        # `ApifyContentScraper`.
         logger.info(
             "YouTube: durata non verificabile per %s, si passa da Apify e download.", url
         )

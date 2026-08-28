@@ -44,6 +44,13 @@ sbagliato costa piu' di un errore subito.
     exit 1
 }
 
+# Senza questo, stdout e stderr rediretti su file sono bufferizzati a blocchi:
+# le righe restano nel buffer e un kill del processo le butta via. E' successo —
+# il log della richiesta da diagnosticare e' sparito insieme al processo che
+# l'aveva servita. Impostarlo qui significa non doverselo ricordare proprio nel
+# momento in cui serve leggere il log.
+$env:PYTHONUNBUFFERED = "1"
+
 # uvicorn importa `app.main` come modulo e `--reload` sorveglia la cartella
 # corrente: entrambi vogliono `backend/` come working directory, non quella da
 # cui e' partito il comando.

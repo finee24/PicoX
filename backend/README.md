@@ -14,10 +14,14 @@ python -m venv .venv && .venv/Scripts/activate     # Windows
 # python3 -m venv .venv && source .venv/bin/activate  # macOS/Linux
 pip install -r requirements.txt
 cp .env.example .env      # e compilare
-uvicorn app.main:app --reload
+./dev.ps1                 # bash/zsh: ./dev.sh
 ```
 
-`http://localhost:8000/docs` per l'OpenAPI interattivo (disattivato quando
+`dev.ps1` fissa interprete e porta: senza, si riscrivono a mano ogni volta ed è
+lì che si sbagliano. **La porta è la 8001**, non la 8000 di default di uvicorn —
+è quella su cui il frontend cerca il backend.
+
+`http://localhost:8001/docs` per l'OpenAPI interattivo (disattivato quando
 `ENVIRONMENT=production`).
 
 `ffprobe` (pacchetto `ffmpeg`) è opzionale in locale: senza, il limite di durata
@@ -221,5 +225,5 @@ prompt senza trascinare il resto del backend nel contesto:
 
 ```bash
 pyright                          # 0 errori sul modulo app/
-uvicorn app.main:app --reload    # e poi: curl localhost:8000/health
+./dev.ps1                        # e poi: curl localhost:8001/health
 ```

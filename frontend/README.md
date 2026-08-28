@@ -20,10 +20,11 @@ npm run dev
 l'origin indicato dalla sua variabile `FRONTEND_URL`, che di default è
 `http://localhost:3000`: su un'altra porta il browser blocca ogni chiamata.
 
-Serve anche il backend attivo su `http://localhost:8000`:
+Serve anche il backend attivo su `http://localhost:8001` — la porta che
+`NEXT_PUBLIC_BACKEND_URL` si aspetta, e che lo script fissa da sé:
 
 ```bash
-cd ../backend && uvicorn app.main:app --reload
+cd ../backend && ./dev.ps1      # bash/zsh: ./dev.sh
 ```
 
 ## Variabili d'ambiente

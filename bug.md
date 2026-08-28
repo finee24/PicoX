@@ -235,33 +235,77 @@ esteso dell'audit e non dipende dalla sorte dei documenti.
 
 **Quando/dove si è visto:** dopo `taskkill`/`pkill` sul processo uvicorn, la
 porta 8001 restava occupata — pur con i comandi che riportavano successo.
+Di nuovo il 28 agosto 2026, **usando il comando che questa voce stessa
+suggeriva**.
 
 **Ipotesi scartate, e perché:**
-- *"Se il comando dice che ha funzionato, ha funzionato"* — falso: uvicorn
-  `--reload` crea un processo padre più un figlio; un kill parziale (solo
-  uno dei due) lascia l'altro a tenere la porta, e il comando può comunque
-  uscire con successo.
+- *"Se il comando dice che ha funzionato, ha funzionato"* — falso: `uvicorn
+  --reload` è una famiglia di processi, e un kill parziale lascia gli altri a
+  tenere la porta uscendo comunque con successo.
+- *"Bastano i processi che nominano `uvicorn`"* — **è ciò che questa voce
+  diceva, ed è sbagliato.** Il processo che serve le richieste è generato con
+  `multiprocessing` e la sua command line è `python.exe -c "from
+  multiprocessing..."`: la stringa `uvicorn` non compare. Misurato il 28 agosto
+  sulla famiglia in ascolto sulla 8001: **due processi, di cui uno solo nomina
+  `uvicorn`** — e quello che non lo nomina è il server. La forma della famiglia
+  cambia anche fra un avvio e l'altro: una volta tre generazioni (reloader →
+  figlio → nipote `multiprocessing`), un'altra due.
 
-**Causa reale:** architettura padre/figlio di `uvicorn --reload`.
+**Causa reale:** il **criterio di ricerca**, non l'architettura. L'identità di
+quei processi non è deducibile dal testo del comando, e il numero di
+generazioni non è stabile: qualunque filtro sul nome è destinato a mancarne uno.
 
-**Fix:** individuare esplicitamente entrambi i PID prima di terminarli:
+**Fix: partire dalla porta, non dal nome del comando.** La porta è il fatto
+osservabile; il nome del processo è un'inferenza.
 
 ```powershell
-Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-  Where-Object { $_.CommandLine -like '*uvicorn*' } |
-  Select-Object ProcessId, CommandLine
-Stop-Process -Id <id1>,<id2> -Force
+# 1. Chi tiene la porta. Il PID arriva dalla porta, non da una ricerca sul nome.
+$radici = Get-NetTCPConnection -LocalPort 8001 -State Listen |
+          Select-Object -ExpandProperty OwningProcess -Unique
+
+# 2. Da ogni radice, tutta la discendenza: il server e' un discendente e non
+#    nomina `uvicorn`.
+$tutti = Get-CimInstance Win32_Process
+$famiglia = @(); $coda = @($radici)
+while ($coda) {
+  $p, $coda = $coda
+  if ($famiglia -notcontains $p) {
+    $famiglia += $p
+    $coda += ($tutti | Where-Object ParentProcessId -eq $p).ProcessId
+  }
+}
+
+# 3. Guardare prima di terminare.
+$tutti | Where-Object { $famiglia -contains $_.ProcessId } |
+  Select-Object ProcessId, ParentProcessId, CommandLine
+Stop-Process -Id $famiglia -Force
+
+# 4. Verificare la PORTA, non l'exit code di Stop-Process.
+Get-NetTCPConnection -LocalPort 8001 -ErrorAction SilentlyContinue |
+  Select-Object State, OwningProcess
 ```
+
+Tre avvertenze dallo stesso giro:
+
+- **`OwningProcess` può indicare un PID che non esiste più.** Il socket resta in
+  `Listen` per qualche minuto dopo la morte del processo: `Get-Process` su quel
+  PID non trova nulla e non c'è nessuno da terminare. Si aspetta, e si ricontrolla.
+- **Non fidarsi dell'exit code di `Stop-Process`**: è esattamente l'errore della
+  prima ipotesi, ripetuto un livello più in là. L'unica prova è il passo 4.
+- **`-State Listen` da solo nasconde il resto**: sulla stessa porta possono
+  esserci connessioni in `FinWait2`/`CloseWait` che spiegano perché non si
+  libera. Per diagnosticare, guardare tutti gli stati.
+
+`backend/dev.ps1` non risolve questo — avvia, non ferma — ma toglie l'altra
+metà del problema: la porta non si sbaglia più a digitarla.
 
 Pointer: nessuna migration — nota operativa, non un bug del codice
 applicativo.
 
-> La più debole delle voci qui sopra sul formato: l'unica "ipotesi
-> scartata" è la fiducia nell'exit code di un comando, non un'ipotesi
-> diagnostica vera e propria — resta più una procedura operativa che
-> un'indagine. Se ricapita, cattura il testo esatto dell'errore di bind
-> sulla porta 8001: accorcerebbe la diagnosi futura più di qualunque altra
-> aggiunta qui.
+> Cosa resta da catturare: il **testo esatto dell'errore di bind** sulla 8001.
+> La richiesta era già in questa voce e il 28 agosto è andata di nuovo a vuoto —
+> quando finalmente si è rilanciato, la porta si era liberata da sé e uvicorn è
+> partito senza errore. Serve prenderlo mentre la porta è ancora occupata.
 
 ---
 

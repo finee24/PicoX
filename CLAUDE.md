@@ -144,7 +144,8 @@ richiesta.
 
 ## Ambiente
 
-- Backend in ascolto su porta **8001**, non 8000.
+- Backend in ascolto su porta **8001**, non 8000: avvialo con `backend/dev.ps1`
+  (o `dev.sh`), che la fissa insieme all'interprete del virtualenv.
 - `GEMINI_MODEL=gemini-flash-latest` — `gemini-2.5-flash` risponde 404 per
   questa chiave API, anche se compare ancora in `models.list()`.
 - Per installare pacchetti nel frontend serve **Node 22 / npm 10** (`nvm

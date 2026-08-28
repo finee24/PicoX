@@ -161,13 +161,19 @@ cd backend
 python -m venv .venv && .venv/Scripts/activate      # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt
 python scripts/check_env.py                          # verifica la configurazione
-uvicorn app.main:app --reload --port 8001
+./dev.ps1                                            # bash/zsh: ./dev.sh
 
 # frontend — http://localhost:3000
 cd frontend
 npm install
 npm run dev
 ```
+
+`backend/dev.ps1` tiene dentro di sé l'interprete del virtualenv e la porta
+**8001**: sono i due valori che si sbagliano riscrivendoli a mano, e la porta in
+particolare non dà un errore di avvio quando è sbagliata — dà "Failed to fetch"
+dal frontend. Se il virtualenv manca, lo script si ferma dicendo come crearlo,
+senza ripiegare sul Python di sistema.
 
 `npm run dev` avvia **solo** il frontend: backend e frontend sono due processi
 separati.

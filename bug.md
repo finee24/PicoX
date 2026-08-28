@@ -197,6 +197,20 @@ successi» qui sopra è del 15 agosto e riguarda il modello a cui l'alias puntav
 allora — non è confrontabile con le osservazioni di fine agosto. Il tetto come
 limite di prodotto sta in `context.md`.
 
+**Isolato ulteriormente il 28 agosto 2026.** Una sonda di **solo testo** — 5
+token, nessun video, nessun `AnalysisContext`, `attempts=1` — ha preso lo stesso
+`503 UNAVAILABLE, "experiencing high demand"`. Esclude con forza il sospetto sul
+prompt lungo del percorso reale, che la nota qui sopra lasciava aperto: **il muro
+non dipende dal contenuto della richiesta**, e con esso cadono anche i residui di
+sospetto sul file, sulla piattaforma e sulla Files API.
+
+Come rifare la prova, ora che si sa come: una `generate_content` di solo testo
+con `HttpRetryOptions(attempts=1)` costa **una** richiesta invece delle tre di
+un'analisi vera, e non paga né Apify né il download. Distingue anche i due
+errori, che l'API di Picox appiattisce entrambi in `503 gemini_unavailable`
+(`gemini_service.py:322-326`): dalla risposta HTTP un `429` di Google è
+indistinguibile da un `503`.
+
 ### `check_env.py` non trova le variabili / crasha proprio quando c'è un errore da segnalare
 
 **Quando/dove si è visto:** eseguito da `backend/` come da README, riportava
@@ -258,40 +272,75 @@ generazioni non è stabile: qualunque filtro sul nome è destinato a mancarne un
 **Fix: partire dalla porta, non dal nome del comando.** La porta è il fatto
 osservabile; il nome del processo è un'inferenza.
 
-```powershell
-# 1. Chi tiene la porta. Il PID arriva dalla porta, non da una ricerca sul nome.
-$radici = Get-NetTCPConnection -LocalPort 8001 -State Listen |
-          Select-Object -ExpandProperty OwningProcess -Unique
+**Due correzioni del 28 agosto, entrambe pagate sul campo** — la prima versione
+di questa ricetta le sbagliava, e mi ha fatto terminare due processi sbagliati
+lasciando in piedi il backend:
 
-# 2. Da ogni radice, tutta la discendenza: il server e' un discendente e non
-#    nomina `uvicorn`.
+1. **Il PID della porta può essere un fantasma.** La tabella TCP conserva
+   l'`OwningProcess` di processi già morti: mi ha dato `18712`, defunto da un
+   giorno, mentre il backend vero girava altrove. Va filtrato contro i processi
+   realmente esistenti **prima** di terminare qualcosa.
+2. **Non basta scendere: bisogna anche salire.** Il proprietario della porta è
+   la generazione di *mezzo*. Osservato oggi: `10952` (lanciato da `dev.ps1`) →
+   `24384` (reloader, **è lui che risulta in ascolto**) → `22416` (server). Una
+   ricerca dei soli discendenti trova `24384` e `22416` e **manca il padre**.
+
+```powershell
+$porta = 8001
 $tutti = Get-CimInstance Win32_Process
-$famiglia = @(); $coda = @($radici)
-while ($coda) {
-  $p, $coda = $coda
-  if ($famiglia -notcontains $p) {
-    $famiglia += $p
-    $coda += ($tutti | Where-Object ParentProcessId -eq $p).ProcessId
+$vivi  = @($tutti.ProcessId)
+
+# 1. Chi tiene la porta, scartando i fantasmi: la tabella TCP tiene i PID di
+#    processi gia' morti, e su quelli non c'e' nulla da terminare.
+$owner = @((Get-NetTCPConnection -LocalPort $porta -State Listen `
+            -ErrorAction SilentlyContinue).OwningProcess | Select-Object -Unique)
+$owner = @($owner | Where-Object { $vivi -contains $_ })
+if (-not $owner) { 'Nessun processo vivo: socket residuo, si aspetta.'; return }
+
+# 2. Salire agli ANTENATI finche' restano dello stesso eseguibile. Il confronto
+#    sul nome e' cio' che ferma la risalita prima della shell che ha lanciato
+#    tutto; quello sulla data protegge dal riuso dei PID.
+$famiglia = @()
+foreach ($o in $owner) {
+  $p = $tutti | Where-Object ProcessId -eq $o
+  while ($p) {
+    if ($famiglia -notcontains $p.ProcessId) { $famiglia += $p.ProcessId }
+    $p = $tutti | Where-Object { $_.ProcessId -eq $p.ParentProcessId `
+                                 -and $_.Name -eq $p.Name `
+                                 -and $_.CreationDate -le $p.CreationDate }
   }
 }
 
-# 3. Guardare prima di terminare.
+# 3. ...poi scendere ai DISCENDENTI di tutto cio' che si e' raccolto.
+$coda = @($famiglia)
+while ($coda) {
+  $c, $coda = $coda
+  foreach ($f in ($tutti | Where-Object ParentProcessId -eq $c)) {
+    if ($famiglia -notcontains $f.ProcessId) { $famiglia += $f.ProcessId; $coda += $f.ProcessId }
+  }
+}
+
+# 4. Guardare prima di terminare.
 $tutti | Where-Object { $famiglia -contains $_.ProcessId } |
-  Select-Object ProcessId, ParentProcessId, CommandLine
+  Select-Object ProcessId, ParentProcessId, Name, CommandLine
 Stop-Process -Id $famiglia -Force
 
-# 4. Verificare la PORTA, non l'exit code di Stop-Process.
-Get-NetTCPConnection -LocalPort 8001 -ErrorAction SilentlyContinue |
+# 5. Verificare la PORTA, non l'exit code di Stop-Process.
+Get-NetTCPConnection -LocalPort $porta -ErrorAction SilentlyContinue |
   Select-Object State, OwningProcess
 ```
 
-Tre avvertenze dallo stesso giro:
+**Falsificata il 28 agosto contro la famiglia viva**, non solo scritta: dalla
+porta risulta il solo `24384`, la risalita aggiunge `10952`, la discesa
+`22416` — tutti e tre, e **non** `18648`, la `powershell.exe` che ha lanciato
+`dev.ps1`, perché il confronto sul nome ferma lì la risalita. Il filtro
+anti-fantasma, provato su `19800` e `21712` (morti) più `24384` (vivo), lascia
+passare solo l'ultimo.
 
-- **`OwningProcess` può indicare un PID che non esiste più.** Il socket resta in
-  `Listen` per qualche minuto dopo la morte del processo: `Get-Process` su quel
-  PID non trova nulla e non c'è nessuno da terminare. Si aspetta, e si ricontrolla.
+Due avvertenze che restano:
+
 - **Non fidarsi dell'exit code di `Stop-Process`**: è esattamente l'errore della
-  prima ipotesi, ripetuto un livello più in là. L'unica prova è il passo 4.
+  prima ipotesi, ripetuto un livello più in là. L'unica prova è il passo 5.
 - **`-State Listen` da solo nasconde il resto**: sulla stessa porta possono
   esserci connessioni in `FinWait2`/`CloseWait` che spiegano perché non si
   libera. Per diagnosticare, guardare tutti gli stati.

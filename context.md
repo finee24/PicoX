@@ -82,7 +82,7 @@ Confermato il 28 agosto 2026 (badge «Livello gratuito» in AI Studio). **20
 richieste al giorno per modello, sull'intero progetto** — non per utente
 (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`) — azzerate a mezzanotte
 Pacific, **verso le 09:00 italiane**. A costo zero è questo il limite vero del
-prodotto: 20 analisi al giorno in tutto, fra tutti gli utenti e tutte le prove.
+prodotto, fra tutti gli utenti e tutte le prove.
 Non un problema tecnico, un limite del piano.
 
 ### A13 — `docker compose up` mai verificato end-to-end
@@ -129,17 +129,18 @@ e già 4 sfora il budget del lock (`analysis_lock_ttl_seconds`). È la leva
 sbagliata per la scala del guasto.
 
 **Non spiegato** perché i cinque fallimenti si siano concentrati lì; il piano
-gratuito qui sopra è il candidato più forte. **Non isolata**:
-`perform_analysis` costruisce un `AnalysisContext` che allunga il prompt, la
-prova isolata no.
+gratuito qui sopra è il candidato più forte. **Prompt escluso**: una sonda di
+solo testo (5 token, nessun video) ha preso lo stesso `503`: il muro non dipende
+dal contenuto.
 
 **Nessun motivo per evitare di riprovare**: non c'è più un esito noto, c'è un
-servizio intermittente. La prova si rifà con `GeminiService.analyze_video` fuori
-da `perform_analysis`: non tocca la quota di Picox, ma sì quella di Google.
+servizio intermittente. Per sapere se il muro c'è adesso basta una
+`generate_content` di solo testo con `attempts=1`: una richiesta invece di tre,
+niente Apify né download.
 
-Dallo stesso giro, non indagato: `POST /creators/validate` → **503** su
-`@geopop` mentre l'analisi riusciva, senza righe nuove in
-`creator_validations`. Se si ripresenta, merita una voce in `bug.md`.
+Non indagato: `POST /creators/validate` → **503** su `@geopop` mentre l'analisi
+riusciva, senza righe nuove in `creator_validations`. Se si ripresenta, merita
+una voce in `bug.md`.
 
 ### Il frontend non ha un test runner
 `frontend/package.json` ha solo `dev`, `build`, `start`, `lint`. La logica di

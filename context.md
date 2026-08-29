@@ -114,19 +114,18 @@ si allinea a un fuso, i tre trigger (`0008`, `0010`, `0011`) vanno fatti
 ### Il `503` di Gemini è intermittente, non legato al video
 `@ingegneri_in_borsa/video/7677930225237314849` aveva **cinque
 `503 gemini_unavailable` su cinque** (26-27 agosto) e sembrava un problema
-di quel file. **Non lo è**: isolando Gemini da Apify e da `perform_analysis` —
-solo upload e `generate_content` — è stato analizzato in **63,8s** senza un
-retry.
+di quel file. **Non lo è**: isolato da Apify e da `perform_analysis`, è stato
+analizzato in **63,8s** senza un retry.
 
-Escluse **dimensione e proprietà del file**: il controllo che funziona è più
-**grande** (18,84 MB / 154s contro 11,28 MB / 86s). Il `503` è
-**intermittente**: lo stesso script, sugli stessi file, ne ha preso uno **dieci
-minuti prima** di riuscire, senza modifiche.
+Il `503` è **intermittente**: lo stesso script, sugli stessi file, ne ha preso
+uno **dieci minuti prima** di riuscire, senza modifiche.
 
-**Non alzare `gemini_retry_attempts` per questo.** Il picco del 27 agosto è
-durato oltre **251s**: anche 6 tentativi col backoff più largo restano a ~242s,
-e già 4 sfora il budget del lock (`analysis_lock_ttl_seconds`). È la leva
-sbagliata per la scala del guasto.
+**Non alzare `gemini_retry_attempts` per questo.** Già 4 sfora il budget del
+lock (`analysis_lock_ttl_seconds`), e il margine è più stretto di quanto si
+leggesse: i ~242s per 6 tentativi valevano ~20s l'uno, cioè **solo per un file
+già scaricato**. Su **passthrough YouTube** un tentativo dura minuti — 224s,
+165s e 300s il 28 agosto, e il terzo ha esaurito `gemini_timeout_seconds` da
+solo. Lì pochi tentativi in più sforano quel timeout prima ancora del TTL.
 
 **Non spiegato** perché i cinque fallimenti si siano concentrati lì; il piano
 gratuito qui sopra è il candidato più forte. **Prompt escluso**: una sonda di
@@ -139,8 +138,8 @@ servizio intermittente. Per sapere se il muro c'è adesso basta una
 niente Apify né download.
 
 Non indagato: `POST /creators/validate` → **503** su `@geopop` mentre l'analisi
-riusciva, senza righe nuove in `creator_validations`. Se si ripresenta, merita
-una voce in `bug.md`.
+riusciva, senza righe nuove in `creator_validations`. Se ricapita, merita una
+voce in `bug.md`.
 
 ### Il frontend non ha un test runner
 `frontend/package.json` ha solo `dev`, `build`, `start`, `lint`. La logica di

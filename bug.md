@@ -211,6 +211,24 @@ errori, che l'API di Picox appiattisce entrambi in `503 gemini_unavailable`
 (`gemini_service.py:322-326`): dalla risposta HTTP un `429` di Google è
 indistinguibile da un `503`.
 
+**Quarto esito, 28 agosto: `504 DEADLINE_EXCEEDED`**, su un tentativo di
+passthrough YouTube durato **300s** — cioè esattamente `gemini_timeout_seconds`.
+Non è un guasto diverso: è lo stesso `503` colpito abbastanza a lungo da
+esaurire il timeout. I tre tentativi di quella richiesta sono durati **224s,
+165s e 300s**, contro i **18-22s** misurati su TikTok già scaricato.
+
+Da cui la correzione che conta: **il costo per tentativo dipende dal percorso**,
+non è una costante del guasto come questa voce assumeva implicitamente. Sul
+passthrough YouTube è Google a scaricare e processare il video a **ogni** retry
+(qui 205s di video); su un file già caricato sulla Files API resta la sola
+inferenza. La richiesta intera è durata **696s**, e la stessa aritmetica in
+`context.md` è stata corretta di conseguenza.
+
+Dallo stesso filone, le misure sulla dimensione del file — un controllo che
+**funziona** è più grande di uno che fallisce, 18,84 MB / 154s contro 11,28 MB /
+86s — restano vere ma sono ormai un caso particolare: la sonda di solo testo
+esclude il contenuto della richiesta per intero.
+
 ### `check_env.py` non trova le variabili / crasha proprio quando c'è un errore da segnalare
 
 **Quando/dove si è visto:** eseguito da `backend/` come da README, riportava

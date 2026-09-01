@@ -41,7 +41,13 @@ class Settings(BaseSettings):
 
     # --- Gemini --------------------------------------------------------------
     gemini_api_key: SecretStr
-    gemini_model: str = "gemini-2.5-flash"
+    # L'alias, non una versione fissata. `gemini-2.5-flash` — il default
+    # precedente — risponde `404 "no longer available to new users"` a questa
+    # chiave (provato il 1 settembre 2026): non è sparito dai modelli, è
+    # chiuso ai progetti nuovi. Un ambiente che dimenticasse `GEMINI_MODEL`
+    # partiva senza errori e falliva ogni analisi; ora il default coincide
+    # con ciò che `.env` e `render.yaml` impostano già.
+    gemini_model: str = "gemini-flash-latest"
     gemini_timeout_seconds: int = 300
     # Attesa massima perché il file caricato passi in stato ACTIVE.
     gemini_file_active_timeout_seconds: int = 120

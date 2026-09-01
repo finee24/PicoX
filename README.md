@@ -121,7 +121,7 @@ viene mai committato:
 | `SUPABASE_SERVICE_ROLE_KEY` | **Bypassa il RLS** — solo server |
 | `SUPABASE_JWT_SECRET` | *Solo* per progetti con JWT secret legacy (HS256). Vedi avvertenza sotto |
 | `GEMINI_API_KEY` | Analisi multimodale |
-| `GEMINI_MODEL` | Default `gemini-2.5-flash`; consigliato `gemini-flash-latest` |
+| `GEMINI_MODEL` | Default `gemini-flash-latest` (alias). `gemini-2.5-flash` è chiuso ai progetti nuovi: risponde `404` |
 | `APIFY_API_TOKEN` | Scraping Instagram / TikTok / YouTube Shorts |
 | `YOUTUBE_API_KEY` | *Facoltativa.* Verifica dei canali YouTube (`channels.list`). Senza, quella sola piattaforma risponde `503` |
 | `CRON_SECRET` | Segreto dell'header `X-CRON-SECRET` |

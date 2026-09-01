@@ -229,6 +229,19 @@ Dallo stesso filone, le misure sulla dimensione del file — un controllo che
 86s — restano vere ma sono ormai un caso particolare: la sonda di solo testo
 esclude il contenuto della richiesta per intero.
 
+**Isolato ulteriormente il 1 settembre 2026:** `gemini-3.5-flash-lite` e
+`gemini-3.1-flash-lite` hanno lo stesso supporto video di `gemini-3.7-flash`
+(schede ufficiali verificate), ma un tetto gratuito di **500 richieste/giorno
+contro 20** — 25 volte più quota giornaliera. Prova diretta che **il muro è per
+modello**, non per chiave né per progetto: `gemini-3.5-flash-lite` ha analizzato
+un video con successo mentre `gemini-flash-latest` rispondeva `503` sulla stessa
+chiave, a secondi di distanza. Non ancora confrontata la profondità dell'analisi
+fra i due modelli sullo stesso input — vedi voce successiva quando disponibile.
+
+> Il 500/giorno viene dalla dashboard «Limitazione di frequenza» di AI Studio:
+> la pagina pubblica dei rate limit non espone più la tabella del free tier,
+> quindi il numero non è verificabile da qui.
+
 ### `check_env.py` non trova le variabili / crasha proprio quando c'è un errore da segnalare
 
 **Quando/dove si è visto:** eseguito da `backend/` come da README, riportava

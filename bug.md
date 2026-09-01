@@ -235,12 +235,64 @@ esclude il contenuto della richiesta per intero.
 contro 20** — 25 volte più quota giornaliera. Prova diretta che **il muro è per
 modello**, non per chiave né per progetto: `gemini-3.5-flash-lite` ha analizzato
 un video con successo mentre `gemini-flash-latest` rispondeva `503` sulla stessa
-chiave, a secondi di distanza. Non ancora confrontata la profondità dell'analisi
-fra i due modelli sullo stesso input — vedi voce successiva quando disponibile.
+chiave, a secondi di distanza.
 
 > Il 500/giorno viene dalla dashboard «Limitazione di frequenza» di AI Studio:
 > la pagina pubblica dei rate limit non espone più la tabella del free tier,
 > quindi il numero non è verificabile da qui.
+
+**Confronto di profondità sullo stesso input, 1 settembre 2026.**
+`@geopop/7522889737288305942` (TikTok, 154s, 18,84 MB) scaricato **una volta
+sola** e dato ai due modelli con lo stesso preset `BOTH`: stessi byte, stesso
+prompt, unica variabile il modello. Il Flash pieno è più profondo, e non di
+poco.
+
+*Contenuti.* Cinque punti chiave contro quattro, ma conta quali: il Flash
+riporta la cifra detta nel video (2-2,5 litri d'acqua al giorno) dove il Lite
+scrive «bere a sufficienza», e cattura due contenuti che il Lite non nomina —
+l'aria condizionata che *previene* i colpi di calore, i filtri non manutenuti
+«sebbene i sistemi moderni riducano il rischio». Il Lite non sbaglia:
+generalizza. Le keyword divergono allo stesso modo — `malattie`, `freddo`,
+`falsi miti` contro `colpo d'aria`, `sbalzo termico`, `geopop`: le seconde
+ritrovano il video, le prime no.
+
+*Stile.* Entrambi vedono il bianco e nero. Il Lite lo chiama «passaggio a
+bianco e nero», il Flash «filtro bianco e nero **per obiezioni**»: ne riconosce
+la funzione narrativa. Stessa distanza nei `retention_devices` — «cambi di
+tonalità visiva» contro «simulazione di obiezioni comuni» e «struttura a
+domande e risposte frequenti». Il `cta` del Flash riporta la chiusura verbatim
+con la tagline del brand; quello del Lite la parafrasa.
+
+*Template dello script inverso: qui il difetto del Lite è strutturale, non
+stilistico.* Il Lite produce `L'{argomento} non {conseguenza negativa},
+sfatiamo questo mito...` — l'articolo elidato `L'` e il verbo `faccia` della
+CTA restano **dentro** il template, quindi la sostituzione genera italiano
+sbagliato («L'meteo…», «chi crede che il caldo faccia…»). Il Flash mette a
+parametro l'intera proposizione (`{Credenza popolare negativa} NON è reale.`)
+e non vincola la grammatica. Sono entrambi template; uno solo regge la
+sostituzione.
+
+*Tempi: un difetto per parte, in punti diversi.* Video reale 154s.
+
+| | Lite 3.5 | Flash latest |
+|---|---|---|
+| `total_duration_seconds` | 150,0 | 155,0 |
+| beat, dal primo all'ultimo | 0:00→2:33 (153s) | 0:00→2:35 (155s) |
+| totale coerente con i beat | **no** (150 contro 153) | sì |
+| scostamento dal reale | −4s | +1s |
+| `hook_duration_seconds` contro beat `hook` | 3,0 = 0:00-0:03, coerente | 3,0 ma beat 0:00-0:08, **incoerente** |
+
+*La scelta non è qualità contro costo, è qualità contro disponibilità.* Il Lite
+ha prodotto in 26,9s al primo tentativo, due volte su due; il Flash ha richiesto
+tre sessioni in due ore — due fallite col `503` — e 103,6s quando è passato.
+Un'analisi più profonda che l'utente non riceve vale meno di una buona che
+arriva.
+
+> **Un solo video, una esecuzione per modello: non basta a scegliere il
+> default.** Il divario è consistente su più campi, ma la sua stabilità non è
+> nota, e `average_shot_duration_seconds` diverge (2,5 contro 4,5) senza che
+> nessuno abbia guardato il video per sapere chi abbia ragione. La decisione
+> aspetta un campione più ampio, non questa voce.
 
 ### `check_env.py` non trova le variabili / crasha proprio quando c'è un errore da segnalare
 

@@ -86,9 +86,18 @@ Pacific (**~09:00 italiane**).
 **`gemini-2.5-flash` è chiuso ai progetti nuovi**, non sparito: `models.list()`
 lo mostra ancora, ma risponde `404 no longer available to new users` (1 set
 2026). Era il default di `config.py`, ora l'alias (`e6f90db`).
-**`gemini-3.6-flash` risponde**, stessa data. **Se conceda più di 20 al giorno
-non lo dicono errori né documentazione**: solo la dashboard «Limitazione di
-frequenza» di AI Studio, mai aperta.
+**`gemini-3.6-flash` risponde**, stessa data; i Lite hanno **500/giorno**
+(dashboard AI Studio — la documentazione pubblica non espone più la tabella).
+
+### Confronto Lite vs Flash chiuso: il default non cambia
+3 video, 9 esecuzioni (1 settembre 2026). **Non cambiare il default**: il Lite
+sbaglia le cifre estratte e produce template inservibili con frequenza — cioè
+colpisce esattamente ciò che Picox vende — mentre il Flash è inaffidabile sulla
+**disponibilità** (`503`/`504` intermittenti, fino a 2 ore di attesa). Il
+ragionamento completo è in `bug.md`, voce sul `503`: **resta com'è**, con le sue
+tre correzioni della giornata, finché il confronto non è chiuso del tutto. Manca
+il Flash sul **passthrough YouTube** in giornata non critica, per dimensionare
+un eventuale fallback.
 
 ### A13 — `docker compose up` mai verificato end-to-end
 Bloccato da Docker non installato in locale, ~10 minuti una volta che c'è.
@@ -117,26 +126,11 @@ si allinea a un fuso, i tre trigger (`0008`, `0010`, `0011`) vanno fatti
 **insieme** — uno solo creerebbe due "giorni" nello stesso database.
 
 ### Il `503` di Gemini è intermittente, non legato al video
-`@ingegneri_in_borsa/video/7677930225237314849` aveva **cinque
-`503 gemini_unavailable` su cinque** (26-27 agosto) e sembrava un problema
-di quel file. **Non lo è**: isolato da Apify e da `perform_analysis`, è stato
-analizzato in **63,8s** senza un retry.
-
-Il `503` è **intermittente**: lo stesso script, sugli stessi file, ne ha preso
-uno **dieci minuti prima** di riuscire, senza modifiche.
-
-**Non alzare `gemini_retry_attempts` per questo.** Già 4 sfora il budget del
-lock (`analysis_lock_ttl_seconds`), e su **passthrough YouTube** un tentativo
-dura minuti, non i ~20s di un file già scaricato: lì pochi tentativi in più
-sforano `gemini_timeout_seconds` prima ancora del TTL. Cifre in `bug.md`.
-
-**Non spiegato** perché i cinque fallimenti si siano concentrati lì; il piano
-gratuito qui sopra è il candidato più forte. **Prompt escluso**: una sonda di
-solo testo (5 token, nessun video) ha preso lo stesso `503`: il muro non dipende
-dal contenuto.
-
-**Nessun motivo per evitare di riprovare**: non c'è un esito noto, c'è un
-servizio intermittente — e la sonda qui sopra lo verifica in una richiesta.
+Cinque `503` su cinque su `@ingegneri_in_borsa/…849` (26-27 agosto) sembravano
+un problema di quel file: non lo era — isolato, analizzato in **63,8s** senza un
+retry. Non dipende dal contenuto, e il muro è **per modello** (1 settembre).
+**Non alzare `gemini_retry_attempts`**: già 4 sfora `analysis_lock_ttl_seconds`,
+e su **passthrough** un tentativo dura minuti, non ~20s. Il resto è in `bug.md`.
 
 Non indagato: `POST /creators/validate` → **503** su `@geopop` mentre l'analisi
 riusciva, senza righe nuove in `creator_validations`. Se ricapita, merita una

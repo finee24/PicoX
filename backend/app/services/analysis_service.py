@@ -34,6 +34,7 @@ from uuid import UUID
 from app.core.config import Settings
 from app.core.exceptions import AnalysisInProgressError
 from app.schemas.analysis import AnalysisMode, VideoAnalysisResponse
+from app.schemas.creators import clean_username
 from app.schemas.insights import InsightResponse
 from app.schemas.scraping import ScraperResult
 from app.services.analysis_lock import analysis_lock
@@ -199,6 +200,83 @@ def _componi_payload_insight(
     if creator_id:
         payload["creator_id"] = str(creator_id)
     return payload
+
+
+async def _creator_seguito(
+    user_id: str, scraped: ScraperResult | None
+) -> str | None:
+    """L'id del creator seguito che ha pubblicato questo video, se esiste.
+
+    Serve al percorso manuale: `analyze-video` non riceve un `creator_id`, e
+    senza questo l'insight resta orfano anche quando l'autore è già nella
+    watchlist di chi lo chiede. Il cron non passa di qui — arriva con il
+    `creator_id` già in mano, e chi lo ha non viene mai sovrascritto.
+
+    **Si parte dai metadati dello scraping, non dall'URL.** L'handle è già stato
+    estratto una volta dal provider: ricavarlo di nuovo dall'URL grezzo
+    significherebbe due definizioni della stessa cosa, destinate a divergere
+    sulle forme che una sola delle due conosce.
+
+    Il confronto è **case-insensitive**: gli handle lo sono su tutte e tre le
+    piattaforme, mentre `creators.username` conserva le maiuscole scritte
+    dall'utente. Un `Geopop` seguito e un `geopop` scrapato sono lo stesso
+    creator, e un confronto esatto li terrebbe separati.
+
+    Il filtro sull'handle è in Python e non nella query: `ilike` tratterebbe `_`
+    e `%` come metacaratteri, e gli underscore negli handle sono la norma
+    (`ingegneri_in_borsa` matcherebbe `ingegnerixin_borsa`). Le righe lette sono
+    poche per costruzione — i creator attivi di *un* utente su *una*
+    piattaforma, sotto il tetto del piano.
+
+    `clean_username` è la stessa funzione che valida gli handle in ingresso, e
+    qui fa anche da guardia: sul percorso YouTube-API `author_username` è il
+    **titolo** del canale, non l'handle (vedi il commento in `content_scraper`),
+    e un titolo con spazi o punteggiatura non passa la validazione — quindi non
+    produce un accoppiamento inventato. Un titolo che *è* già un handle valido
+    resta ammesso: in quel caso l'attribuzione è quella giusta.
+    """
+    if scraped is None or not scraped.author_username.strip():
+        return None
+
+    try:
+        handle = clean_username(scraped.author_username)
+    except ValueError:
+        logger.debug(
+            "Autore non utilizzabile come handle, nessuna attribuzione automatica."
+        )
+        return None
+
+    creators = await service_table("creators", user_id)
+    async with db_errors("ricerca del creator seguito"):
+        result = await (
+            creators.select("id", "username")
+            .eq("platform", scraped.platform)
+            .eq("is_active", True)
+            .order("created_at")
+            .execute()
+        )
+
+    atteso = handle.casefold()
+    # PostgREST tipizza `data` come JSON generico; qui le righe sono oggetti.
+    corrispondenti = [
+        riga
+        for riga in (result.data or [])
+        if isinstance(riga, dict) and str(riga.get("username", "")).casefold() == atteso
+    ]
+    if not corrispondenti:
+        return None
+
+    # Esatto prima del solo-casefold: se l'utente segue sia `Geopop` sia
+    # `geopop` (il vincolo unico non lo impedisce, è case-sensitive), la scelta
+    # non deve dipendere dall'ordine di lettura.
+    scelto = next(
+        (riga for riga in corrispondenti if str(riga.get("username", "")) == handle),
+        corrispondenti[0],
+    )
+    logger.info(
+        "Video attribuito al creator seguito %s (%s).", scelto["id"], scraped.platform
+    )
+    return str(scelto["id"])
 
 
 async def _assicura_attribuzione(
@@ -509,6 +587,13 @@ async def _esegui_analisi(
         )
 
     thumbnail_url = scraped.thumbnail_url if scraped is not None else None
+
+    # Percorso manuale: nessun creator è stato passato, ma l'autore potrebbe
+    # essere già seguito. Si guarda **dopo** lo scraping, che i metadati li ha
+    # già, e solo se il chiamante non ne ha portato uno: il cron ha sempre
+    # ragione sul creator del video che ha appena elencato.
+    if creator_id is None:
+        creator_id = await _creator_seguito(user_id, scraped)
 
     analysis = await run_analysis(
         scraped,

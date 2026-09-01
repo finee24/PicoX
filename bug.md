@@ -241,58 +241,83 @@ chiave, a secondi di distanza.
 > la pagina pubblica dei rate limit non espone più la tabella del free tier,
 > quindi il numero non è verificabile da qui.
 
-**Confronto di profondità sullo stesso input, 1 settembre 2026.**
-`@geopop/7522889737288305942` (TikTok, 154s, 18,84 MB) scaricato **una volta
-sola** e dato ai due modelli con lo stesso preset `BOTH`: stessi byte, stesso
-prompt, unica variabile il modello. Il Flash pieno è più profondo, e non di
-poco.
+**Confronto di profondità, 1-2 settembre 2026 — e l'errore di metodo che ha
+prodotto la prima versione di questa nota.** Due video TikTok
+(`@geopop/7522889737288305942`, 154s; `@ingegneri_in_borsa/…849`, 86s),
+scaricati una volta sola ciascuno e dati ai modelli con lo stesso preset `BOTH`:
+stessi byte, stesso prompt, unica variabile il modello.
 
-*Contenuti.* Cinque punti chiave contro quattro, ma conta quali: il Flash
-riporta la cifra detta nel video (2-2,5 litri d'acqua al giorno) dove il Lite
-scrive «bere a sufficienza», e cattura due contenuti che il Lite non nomina —
-l'aria condizionata che *previene* i colpi di calore, i filtri non manutenuti
-«sebbene i sistemi moderni riducano il rischio». Il Lite non sbaglia:
-generalizza. Le keyword divergono allo stesso modo — `malattie`, `freddo`,
-`falsi miti` contro `colpo d'aria`, `sbalzo termico`, `geopop`: le seconde
-ritrovano il video, le prime no.
+*La conclusione è arrivata per ultima e conta più di tutte le altre: **la
+varianza fra due giri dello stesso modello è dello stesso ordine del divario
+fra i due modelli**.* Sul secondo video il Lite, girato due volte sullo stesso
+file, ha prodotto due cifre diverse per lo stesso dato — **241.000 contro
+214.000** auto prodotte in Italia — e il Flash concorda con la seconda. Non
+verificato contro il video, ma una trasposizione di cifre che le altre due
+esecuzioni non fanno è l'ipotesi più economica: **un giro su due ha sbagliato
+un numero**, ed è l'errore che un prodotto di estrazione dati non può
+permettersi — un riassunto vago si nota, una cifra sbagliata no. Lo stesso giro
+omette le svalutazioni da 25 miliardi e la Fiom, che l'altro cita.
 
-*Stile.* Entrambi vedono il bianco e nero. Il Lite lo chiama «passaggio a
-bianco e nero», il Flash «filtro bianco e nero **per obiezioni**»: ne riconosce
-la funzione narrativa. Stessa distanza nei `retention_devices` — «cambi di
-tonalità visiva» contro «simulazione di obiezioni comuni» e «struttura a
-domande e risposte frequenti». Il `cta` del Flash riporta la chiusura verbatim
-con la tagline del brand; quello del Lite la parafrasa.
+Da qui la correzione a `25d7019`, che aveva chiuso questa nota poche ore prima:
+quel commit misurava **una esecuzione per modello su un solo video** e
+attribuiva al modello un divario che il Lite produce anche contro sé stesso. La
+misura non era sbagliata — era indistinguibile dal rumore, che nessuno aveva
+misurato. Il titolo di quel commit («il Lite generalizza dove l'altro estrae»)
+resta vero per quei due output, non come proprietà dei due modelli.
 
-*Template dello script inverso: qui il difetto del Lite è strutturale, non
-stilistico.* Il Lite produce `L'{argomento} non {conseguenza negativa},
-sfatiamo questo mito...` — l'articolo elidato `L'` e il verbo `faccia` della
-CTA restano **dentro** il template, quindi la sostituzione genera italiano
-sbagliato («L'meteo…», «chi crede che il caldo faccia…»). Il Flash mette a
-parametro l'intera proposizione (`{Credenza popolare negativa} NON è reale.`)
-e non vincola la grammatica. Sono entrambi template; uno solo regge la
-sostituzione.
+*Contenuti — il divario esiste, più piccolo di come era stato scritto.* Sul
+primo video il Flash riporta la cifra detta (2-2,5 litri d'acqua al giorno)
+dove il Lite scrive «bere a sufficienza», e nomina due contenuti che il Lite
+salta. Sul secondo prende la sospensione del dividendo e il **−24% del titolo
+in una seduta**, che nessuno dei due giri del Lite cita, e segmenta in 6 beat
+con un `payoff` che entrambi i Lite saltano. Ma il Lite del secondo giro nomina
+la **Fiom** come fonte, che il Flash non cita.
 
-*Tempi: un difetto per parte, in punti diversi.* Video reale 154s.
+*Stile.* Il Flash legge la funzione, il Lite descrive l'apparenza: dove il Lite
+vede «passaggio a bianco e nero», il Flash vede «filtro bianco e nero **per
+obiezioni**». Stessa distanza nei `retention_devices`. Il `cta` del Flash
+riporta la chiusura verbatim con la tagline del brand; quello del Lite la
+parafrasa.
 
-| | Lite 3.5 | Flash latest |
+*Template dello script inverso: instabile in entrambi, più marcato nel Lite.*
+Su tre esecuzioni il Lite ha prodotto tre template di qualità diversa — uno
+pulito (`Ma {azienda o settore} è {condizione negativa}?`), uno con l'articolo
+elidato incastrato (`L'{argomento} non {conseguenza negativa}`, che alla
+sostituzione produce «L'meteo…»), uno con un artefatto letterale
+(`Ditecelo nei commenti, e {invito secondario}.format`). Il Flash, su due, ne
+ha prodotto uno accettabile e uno **inerte**, senza alcun segnaposto
+(`Ditecelo nei commenti e lasciate un like.`). L'accordo grammaticale è
+sbagliato in entrambi: `{azienda o settore} è **messo**` nel Lite,
+`{brand o istituzione} è **messa**` nel Flash.
+
+Verificato che l'artefatto `.format` **non viene da noi**: i prompt usano
+segnaposto `{platform}`, `{caption}`, `{allowed_categories}` risolti a monte, e
+né i prompt né le descrizioni dello schema contengono mai quella stringa.
+
+*Tempi: nessuno dei due è affidabile, e i difetti si scambiano di posto fra i
+due video.*
+
+| | video 1 (154s reali) | video 2 (86s reali) |
 |---|---|---|
-| `total_duration_seconds` | 150,0 | 155,0 |
-| beat, dal primo all'ultimo | 0:00→2:33 (153s) | 0:00→2:35 (155s) |
-| totale coerente con i beat | **no** (150 contro 153) | sì |
-| scostamento dal reale | −4s | +1s |
-| `hook_duration_seconds` contro beat `hook` | 3,0 = 0:00-0:03, coerente | 3,0 ma beat 0:00-0:08, **incoerente** |
+| Lite | 150,0 dichiarati, beat fino a 153s (**−4s**), hook coerente | **86,0 esatti**, beat fino a 86s — in entrambi i giri |
+| Flash | 155,0 e beat fino a 155s (+1s), ma `hook_duration_seconds` 3,0 con beat `hook` di 8s | 87,0 e beat fino a 87s (+1s), hook coerente |
 
-*La scelta non è qualità contro costo, è qualità contro disponibilità.* Il Lite
-ha prodotto in 26,9s al primo tentativo, due volte su due; il Flash ha richiesto
-tre sessioni in due ore — due fallite col `503` — e 103,6s quando è passato.
+Sul primo video il Lite sbaglia il totale e il Flash l'hook; sul secondo il Lite
+è esatto e il Flash resta a +1s. Due difetti che cambiano posto, non una regola.
+
+*La scelta resta fra profondità e disponibilità.* Il Lite ha risposto **4 volte
+su 4 al primo tentativo**, in 21-28s. Il Flash ha richiesto due attese di due
+ore su due video, e in mezzo ha restituito un `504 DEADLINE_EXCEEDED` su una
+sonda di **5 token di solo testo** con timeout a 30s: non quota — capacità.
 Un'analisi più profonda che l'utente non riceve vale meno di una buona che
 arriva.
 
-> **Un solo video, una esecuzione per modello: non basta a scegliere il
-> default.** Il divario è consistente su più campi, ma la sua stabilità non è
-> nota, e `average_shot_duration_seconds` diverge (2,5 contro 4,5) senza che
-> nessuno abbia guardato il video per sapere chi abbia ragione. La decisione
-> aspetta un campione più ampio, non questa voce.
+> **Perché il default non è ancora deciso.** Non mancava un video: mancava la
+> ripetizione. Due modelli confrontati una volta ciascuno misurano il rumore
+> quanto il segnale, e questa nota lo ha imparato correggendo sé stessa a poche
+> ore di distanza. Servono più giri per modello sullo stesso input — sul Lite
+> non costano nulla (500/giorno), sul Flash sono 6-9 richieste su 20 e due ore
+> di attesa quando cade. `config.py` resta invariato.
 
 ### `check_env.py` non trova le variabili / crasha proprio quando c'è un errore da segnalare
 

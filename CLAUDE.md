@@ -51,10 +51,8 @@ richiesta.
 
 ## Strumenti già disponibili in `.claude/`
 
-- **Agenti** (`.claude/agents/`): `security-reviewer.md` — invocalo per
-  modifiche che toccano autenticazione, RLS, denaro/quota, o superficie
-  esposta a Internet (nuovo endpoint pubblico, webhook), prima di considerare
-  il lavoro finito. `prompt-tuner.md` — per modifiche ai prompt Gemini.
+- **Agenti** (`.claude/agents/`): `security-reviewer.md` — quando invocarlo è
+  nell'ultima sezione. `prompt-tuner.md` — per i prompt Gemini.
 - **Hook** (`.claude/hooks/`): girano già in automatico, non serve invocarli.
   `block_frontend_secrets.py` blocca segreti scritti in `frontend/`;
   `lint_python.py`/`lint_frontend.py` fanno lint dopo ogni modifica;
@@ -146,8 +144,9 @@ richiesta.
 
 - Backend in ascolto su porta **8001**, non 8000: avvialo con `backend/dev.ps1`
   (o `dev.sh`), che la fissa insieme all'interprete del virtualenv.
-- `GEMINI_MODEL=gemini-flash-latest` — `gemini-2.5-flash` risponde 404 per
-  questa chiave API, anche se compare ancora in `models.list()`.
+- `GEMINI_MODEL=gemini-flash-latest` — `gemini-2.5-flash` risponde 404: chiuso
+  ai progetti nuovi, non un problema della chiave. Compare ancora in
+  `models.list()`, che quindi non dice quali modelli sono usabili.
 - Per installare pacchetti nel frontend serve **Node 22 / npm 10** (`nvm
   use` legge `.nvmrc`). Altre versioni scrivono un lockfile che si rompe
   solo in CI; `engine-strict=true` in `.npmrc` blocca subito con
@@ -168,35 +167,23 @@ richiesta.
 ## Quando arriverà il billing (Stripe)
 
 Non ancora costruito — nessun endpoint webhook, nessuna colonna oltre a
-`subscriptions.tier`. Quattro trappole già mappate in `SECURITY_AUDIT.md`
-(Categoria B), da non re-imparare a caro prezzo:
-
-- **Firma del webhook sul corpo grezzo**, prima di qualunque parsing JSON —
-  se FastAPI parsa e poi si riserializza per verificare, i byte cambiano e
-  la firma non torna mai. Il pattern esiste già: `verify_cron_secret` usa
-  `hmac.compare_digest` sui byte, riusalo. Verificare anche la tolleranza
-  temporale sul timestamp della firma.
-- **Le consegne duplicate sono la norma**, non l'anomalia (Stripe ritenta
-  fino a 3 giorni). Serve una tabella dedicata, senza TTL:
-  `processed_webhook_events (event_id text primary key, processed_at
-  timestamptz)` — un evento già visto fa collidere l'`INSERT` e si scarta.
-  Il principio (l'arbitro è un vincolo del database, non il processo) è
-  già in uso in `analysis_locks`/`job_locks`, ma lì il meccanismo è un lock
-  a TTL, non un inserimento permanente — stessa idea di fondo, meccanismo
-  diverso: non copiare quel codice, copiare il principio.
-- **Stripe non garantisce l'ordine di consegna**: un evento vecchio arrivato
-  dopo uno nuovo non va applicato ciecamente, va confrontato il timestamp
-  dell'oggetto.
-- **Lo stato "pagato" non può restare una stringa senza scadenza**: serve
-  `status` + fine periodo, non solo `tier`.
+`subscriptions.tier`. Quattro trappole, **per intero in `SECURITY_AUDIT.md`
+B1-B3: leggile lì prima di scrivere la prima riga**, non sono riassumibili
+senza perdere il come. In breve: firma sul **corpo grezzo** prima di qualunque
+parsing (il pattern c'è già, `hmac.compare_digest` in `verify_cron_secret`) più
+la tolleranza sul timestamp; consegne duplicate come norma, arbitrate da un
+vincolo del database (`processed_webhook_events`, senza TTL — di
+`analysis_locks` si copia il principio, non il meccanismo a TTL); ordine di
+consegna non garantito, quindi si confronta il timestamp dell'oggetto; stato
+"pagato" con `status` + fine periodo, mai una stringa sola.
 
 ## Prima di considerare un task finito
 
 - Backend: `pytest`, `ruff check`, `mypy` puliti.
 - Frontend: `eslint`, `tsc --noEmit`, `next build` puliti.
 - Per modifiche che toccano autenticazione, RLS, denaro/quota, o superficie
-  esposta a Internet: valuta un giro di `security-reviewer` prima di dire
-  che il lavoro è finito.
+  esposta a Internet (nuovo endpoint pubblico, webhook): valuta un giro di
+  `security-reviewer` prima di dire che il lavoro è finito.
 - **Se hai appena chiuso un bug che ha richiesto più di un'ipotesi prima
   della causa vera, aggiungi una voce a `bug.md` ora** — è il momento in cui
   costa meno, molto meno che ricostruirlo da documenti sparsi mesi dopo.

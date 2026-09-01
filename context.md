@@ -78,12 +78,17 @@ dashboard, non modificabile). Configurarne uno proprio toglie quella barriera
 senza alcun segnale, lasciando il solo CAPTCHA.
 
 ### Gemini è sul piano gratuito: 20 analisi al giorno in tutto
-Confermato il 28 agosto 2026 (badge «Livello gratuito» in AI Studio). **20
-richieste al giorno per modello, sull'intero progetto** — non per utente
-(`GenerateRequestsPerDayPerProjectPerModel-FreeTier`) — azzerate a mezzanotte
-Pacific, **verso le 09:00 italiane**. A costo zero è questo il limite vero del
-prodotto, fra tutti gli utenti e tutte le prove.
-Non un problema tecnico, un limite del piano.
+28 agosto 2026, AI Studio: **20 richieste al giorno per modello, sull'intero
+progetto** — non per utente
+(`GenerateRequestsPerDayPerProjectPerModel-FreeTier`), azzerate a mezzanotte
+Pacific (**~09:00 italiane**).
+
+**`gemini-2.5-flash` è chiuso ai progetti nuovi**, non sparito: `models.list()`
+lo mostra ancora, ma risponde `404 no longer available to new users` (1 set
+2026). Era il default di `config.py`, ora l'alias (`e6f90db`).
+**`gemini-3.6-flash` risponde**, stessa data. **Se conceda più di 20 al giorno
+non lo dicono errori né documentazione**: solo la dashboard «Limitazione di
+frequenza» di AI Studio, mai aperta.
 
 ### A13 — `docker compose up` mai verificato end-to-end
 Bloccato da Docker non installato in locale, ~10 minuti una volta che c'è.
@@ -121,21 +126,17 @@ Il `503` è **intermittente**: lo stesso script, sugli stessi file, ne ha preso
 uno **dieci minuti prima** di riuscire, senza modifiche.
 
 **Non alzare `gemini_retry_attempts` per questo.** Già 4 sfora il budget del
-lock (`analysis_lock_ttl_seconds`), e il margine è più stretto di quanto si
-leggesse: i ~242s per 6 tentativi valevano ~20s l'uno, cioè **solo per un file
-già scaricato**. Su **passthrough YouTube** un tentativo dura minuti — 224s,
-165s e 300s il 28 agosto, e il terzo ha esaurito `gemini_timeout_seconds` da
-solo. Lì pochi tentativi in più sforano quel timeout prima ancora del TTL.
+lock (`analysis_lock_ttl_seconds`), e su **passthrough YouTube** un tentativo
+dura minuti, non i ~20s di un file già scaricato: lì pochi tentativi in più
+sforano `gemini_timeout_seconds` prima ancora del TTL. Cifre in `bug.md`.
 
 **Non spiegato** perché i cinque fallimenti si siano concentrati lì; il piano
 gratuito qui sopra è il candidato più forte. **Prompt escluso**: una sonda di
 solo testo (5 token, nessun video) ha preso lo stesso `503`: il muro non dipende
 dal contenuto.
 
-**Nessun motivo per evitare di riprovare**: non c'è più un esito noto, c'è un
-servizio intermittente. Per sapere se il muro c'è adesso basta una
-`generate_content` di solo testo con `attempts=1`: una richiesta invece di tre,
-niente Apify né download.
+**Nessun motivo per evitare di riprovare**: non c'è un esito noto, c'è un
+servizio intermittente — e la sonda qui sopra lo verifica in una richiesta.
 
 Non indagato: `POST /creators/validate` → **503** su `@geopop` mentre l'analisi
 riusciva, senza righe nuove in `creator_validations`. Se ricapita, merita una

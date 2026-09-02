@@ -268,6 +268,44 @@ def test_su_youtube_un_titolo_handle_shaped_non_aggancia_nulla(
     assert store.rows("insights")[0]["creator_id"] is None
 
 
+
+def test_su_youtube_nemmeno_il_ripiego_apify_aggancia(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    store: FakeStore,
+    apify: FakeApify,
+    youtube: FakeYouTube,
+) -> None:
+    """Il secondo vettore YouTube, che il test qui sopra non tocca.
+
+    Quando la YouTube API non restituisce metadati si ripiega su Apify
+    (`content_scraper`), ma `author_username` non migliora: `_AUTHOR_KEYS`
+    prova `channelUsername` e poi **ricade** su `channelName`/`channelTitle`,
+    che sono nomi visualizzati scelti dal proprietario del canale.
+
+    La `platform` resta `youtube_shorts` anche su questo ramo, quindi
+    l'esclusione lo copre — ma senza questo test la copertura riguarderebbe il
+    solo passthrough, e un domani il ripiego potrebbe divergere senza che nulla
+    lo segnali.
+    """
+    _segui(store, username="geopop", platform="youtube_shorts")
+    # Nessun metadato dalla Data API: e' cio' che forza il ripiego su Apify.
+    youtube.video = None
+    apify.resolved = _video_di("geopop")
+
+    risposta = client.post(
+        "/api/v1/analyze-video",
+        headers=auth_headers,
+        json={"video_url": YOUTUBE_URL, "analysis_mode": "STYLE"},
+    )
+
+    assert risposta.status_code == 201, risposta.text
+    assert risposta.json()["creator_id"] is None, (
+        "il ripiego Apify su YouTube ha agganciato un creator: la platform e' "
+        "ancora youtube_shorts e l'esclusione deve valere anche qui"
+    )
+
+
 def test_la_stessa_corrispondenza_aggancia_su_tiktok(
     client: TestClient,
     auth_headers: dict[str, str],
@@ -287,7 +325,11 @@ def test_la_stessa_corrispondenza_aggancia_su_tiktok(
 
 
 # =============================================================================
-# 5. Il dedotto non sostituisce, e una riga malformata non e' un 500
+# 5. Una riga di `creators` malformata non e' un 500
+#
+# (Che il creator dedotto non sostituisca quello in archivio si verifica in
+# `test_concorrenza_analisi.py`: la' c'e' gia' l'apparato per far scrivere il
+# cron prima dell'analisi manuale.)
 # =============================================================================
 
 

@@ -27,8 +27,9 @@ import pytest
 
 from app.core.config import get_settings
 from app.core.exceptions import AnalysisInProgressError, GeminiError
+from app.schemas.insights import InsightResponse
 from app.services import analysis_lock as lock_service
-from app.services.analysis_service import perform_analysis
+from app.services.analysis_service import _assicura_attribuzione, perform_analysis
 from app.services.apify_service import ScrapedVideo
 from tests.conftest import USER_ID, FakeApify, FakeGemini, FakeYouTube
 from tests.fake_supabase import FakeStore
@@ -431,3 +432,58 @@ async def test_attesa_scaduta_risponde_409(
     assert errore.value.status_code == 409
     # Nessuna spesa: chi si arrende non deve aver chiamato nulla.
     assert len(gemini.calls) == 0
+
+
+async def test_un_record_stantio_non_sovrascrive_l_attribuzione_in_archivio(
+    app: Any,
+    store: FakeStore,
+) -> None:
+    """La guardia che vive nel `WHERE`, non in memoria.
+
+    Separare il creator dedotto dal payload ha sostituito **una** scrittura
+    atomica con **due** round-trip: l'upsert, poi l'update condizionale. Fra i
+    due c'e' una finestra, e non e' chiusa dal lock: quello e' su
+    `(user_id, cache_key, mode)`, quindi una richiesta sullo stesso video in
+    una **modalita' diversa** ne ottiene uno proprio e puo' scrivere in mezzo.
+
+    Quando succede, `record.creator_id` in memoria e' lo snapshot del *proprio*
+    upsert — ancora `None` — e la guardia applicativa
+    `record.creator_id is not None` non vede nulla da proteggere. L'unica cosa
+    che resta e' `.is_("creator_id", "null")` nella `UPDATE`.
+
+    Questo test isola quella riga: prima esisteva, ma toglierla lasciava la
+    suite intera verde, perche' le due guardie si coprono a vicenda in ogni
+    scenario **sequenziale**. Qui lo scenario e' l'interleaving, e la guardia
+    in memoria e' gia' stata superata per costruzione.
+    """
+    # La riga e' completa di proposito: senza la guardia l'`UPDATE` riesce e il
+    # suo ritorno viene rivalidato come `InsightResponse`. Con una riga parziale
+    # il test fallirebbe li', con una `ValidationError` che non dice nulla del
+    # difetto — verde o rosso per la ragione sbagliata.
+    riga = store.seed(
+        "insights",
+        {
+            "user_id": USER_ID,
+            "video_url": VIDEO_URL,
+            "cache_key": CACHE_KEY,
+            "analysis_mode": "BOTH",
+            "thumbnail_url": None,
+            "keywords": [],
+            "created_at": datetime.now(UTC).isoformat(),
+            # Chi ha vinto la corsa nel frattempo: il cron, che il creator lo sa.
+            "creator_id": CREATOR_ID,
+        },
+    )
+
+    # Lo snapshot com'era **prima** della scrittura altrui: il valore che la
+    # richiesta in corso si porta dietro dal proprio upsert.
+    stantio = InsightResponse.model_validate({**riga, "creator_id": None})
+
+    dedotto = "99999999-8888-7777-6666-555555555555"
+    restituito = await _assicura_attribuzione(stantio, USER_ID, dedotto)
+
+    assert store.rows("insights")[0]["creator_id"] == CREATOR_ID, (
+        "un'attribuzione dedotta ha sovrascritto quella scritta da un'altra "
+        "richiesta: la UPDATE deve filtrare su `creator_id is null`"
+    )
+    assert restituito.creator_id != dedotto

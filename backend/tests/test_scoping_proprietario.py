@@ -9,7 +9,7 @@ Il buco non era teorico. Col client service-role il RLS è scavalcato per
 costruzione, quindi una `select` senza filtro restituisce le righe di *tutti* i
 tenant — ed è esattamente la fuga che la classe esiste per rendere impossibile.
 
-## Quattro percorsi vivi dipendono da questo filtro, oggi
+## Cinque percorsi vivi dipendono da questo filtro, oggi
 
 Il **job cron** non ha un JWT di sessione e ricade sempre sul client
 service-role, dove il RLS non esiste. Verificato riga per riga:
@@ -22,6 +22,10 @@ service-role, dove il RLS non esiste. Verificato riga per riga:
   come cache hit di questo.
 * `analysis_service._assicura_attribuzione` → `update`. Filtra solo su `id` e
   `creator_id is null`: il proprietario lo mette **solo** `ScopedTable.update`.
+* `analysis_service._creator_seguito` → `select("id","username")` su
+  `creators`. Senza filtro dedurrebbe l'autore di un video dai creator di
+  **tutti** i tenant, e scriverebbe su `insights` il `creator_id` di un altro
+  utente: non una lettura sbagliata, un identificatore altrui persistito.
 * `analysis_service`, scrittura finale → `upsert`. Qui regge la guardia su
   `on_conflict`, che pretende `user_id` nel target.
 

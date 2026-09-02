@@ -197,6 +197,11 @@ def _componi_payload_insight(
         "keywords": list(analysis.keywords),
     }
 
+    # Truthiness e non `is not None`, **lo stesso criterio** con cui
+    # `_esegui_analisi` decide se dedurre il creator. I due punti devono
+    # concordare: se qui si omettesse su `""` mentre là si deducesse solo su
+    # `None`, un `creator_id` vuoto non produrrebbe né attribuzione né
+    # deduzione, e nessuno dei due punti segnalerebbe nulla.
     if creator_id:
         payload["creator_id"] = str(creator_id)
     return payload
@@ -229,13 +234,46 @@ async def _creator_seguito(
     piattaforma, sotto il tetto del piano.
 
     `clean_username` è la stessa funzione che valida gli handle in ingresso, e
-    qui fa anche da guardia: sul percorso YouTube-API `author_username` è il
-    **titolo** del canale, non l'handle (vedi il commento in `content_scraper`),
-    e un titolo con spazi o punteggiatura non passa la validazione — quindi non
-    produce un accoppiamento inventato. Un titolo che *è* già un handle valido
-    resta ammesso: in quel caso l'attribuzione è quella giusta.
+    qui fa anche da guardia sulle forme che handle non sono.
+
+    **`youtube_shorts` è escluso, e non per prudenza generica.** Su quel
+    percorso `author_username` è il **titolo** del canale, non l'handle:
+    `videos.list` non espone l'handle, servirebbe una `channels.list` sul
+    `channelId` (vedi il commento in `content_scraper`). Il titolo lo sceglie
+    chi possiede il canale, quindi non è un identificatore: chiunque può
+    intitolare il proprio canale `geopop` e — se la vittima analizza a mano uno
+    di quei video — farlo agganciare al creator sbagliato della *sua* watchlist.
+    `clean_username` non lo ferma, perché una parola sola alfanumerica è un
+    handle sintatticamente valido. La guardia sintattica scarta le forme
+    sbagliate, non le attribuzioni sbagliate: finché su YouTube non c'è un
+    handle vero da confrontare, qui non si deduce nulla.
+
+    **Il risultato non entra nel payload dell'upsert.** Chi chiama applica
+    l'attribuzione dedotta con `_assicura_attribuzione`, che riempie solo se la
+    colonna è ancora vuota. È la differenza fra "dedotto" e "passato dal
+    chiamante": il secondo è un'affermazione di chi sa (il cron), il primo è
+    un'ipotesi ricavata da un handle, e un'ipotesi non deve poter cancellare
+    un'attribuzione già in archivio.
+
+    **Il cache hit resta scoperto, ed è deliberato.** Questa funzione vive solo
+    dentro `_esegui_analisi`, cioè sul ramo che *rianalizza*. Su un cache hit
+    non c'è stato scraping, quindi non c'è alcun handle da confrontare, e
+    ricavarlo costerebbe una chiamata al provider per una riga già pagata. Un
+    video analizzato *prima* che il suo autore entrasse nella watchlist resta
+    quindi orfano: il cron non ci ritorna (`_filter_already_analyzed`) e la
+    richiesta manuale successiva è un cache hit. Chiuderlo è un lavoro a sé.
     """
     if scraped is None or not scraped.author_username.strip():
+        return None
+
+    # Vedi la docstring: qui `author_username` è il titolo del canale, che lo
+    # sceglie un terzo. Nessuna deduzione è meglio di una deduzione influenzabile
+    # da chi pubblica il video.
+    if scraped.platform == "youtube_shorts":
+        logger.debug(
+            "Deduzione del creator non applicabile su youtube_shorts: "
+            "l'autore noto è il titolo del canale, non l'handle."
+        )
         return None
 
     try:
@@ -273,10 +311,17 @@ async def _creator_seguito(
         (riga for riga in corrispondenti if str(riga.get("username", "")) == handle),
         corrispondenti[0],
     )
+    # `.get` come le due letture qui sopra, e per la stessa ragione: `data` è
+    # JSON generico. Una riga senza `id` è una mancata attribuzione, non un 500.
+    identificativo = scelto.get("id")
+    if not identificativo:
+        logger.warning("Creator corrispondente senza id utilizzabile: nessuna attribuzione.")
+        return None
+
     logger.info(
-        "Video attribuito al creator seguito %s (%s).", scelto["id"], scraped.platform
+        "Video attribuito al creator seguito %s (%s).", identificativo, scraped.platform
     )
-    return str(scelto["id"])
+    return str(identificativo)
 
 
 async def _assicura_attribuzione(
@@ -592,8 +637,16 @@ async def _esegui_analisi(
     # essere già seguito. Si guarda **dopo** lo scraping, che i metadati li ha
     # già, e solo se il chiamante non ne ha portato uno: il cron ha sempre
     # ragione sul creator del video che ha appena elencato.
-    if creator_id is None:
-        creator_id = await _creator_seguito(user_id, scraped)
+    #
+    # `dedotto` resta una variabile a sé e **non** confluisce in `creator_id`:
+    # ciò che entra nel payload dell'upsert finisce in `ON CONFLICT DO UPDATE
+    # SET`, cioè può *sostituire* il valore in archivio. Per un'attribuzione
+    # dedotta da un handle sarebbe la perdita silenziosa che questo modulo
+    # esiste per impedire — il cron scrive il creator B, una rianalisi manuale
+    # in un'altra modalità deduce A, e B sparisce senza lasciare traccia
+    # (`insights` non denormalizza l'handle, e il cron non ripassa sui video
+    # già analizzati). Si applica dopo la scrittura, in modo condizionale.
+    dedotto = await _creator_seguito(user_id, scraped) if not creator_id else None
 
     analysis = await run_analysis(
         scraped,
@@ -633,6 +686,12 @@ async def _esegui_analisi(
         )
         if stored is None:
             raise RuntimeError("L'insight non risulta salvato dopo l'upsert.")
-        return stored, False
+        return await _assicura_attribuzione(stored, user_id, dedotto), False
 
-    return InsightResponse.model_validate(result.data[0]), False
+    record = InsightResponse.model_validate(result.data[0])
+    # L'attribuzione **dedotta** si applica solo qui, dopo la scrittura, e con
+    # lo stesso update condizionale dei cache hit: riempie la colonna se è
+    # vuota e non rimpiazza mai. Se l'upsert ha aggiornato una riga che aveva
+    # già un creator — quello passato dal cron — `_assicura_attribuzione` esce
+    # subito e il valore in archivio resta intatto.
+    return await _assicura_attribuzione(record, user_id, dedotto), False

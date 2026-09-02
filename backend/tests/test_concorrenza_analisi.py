@@ -29,6 +29,7 @@ from app.core.config import get_settings
 from app.core.exceptions import AnalysisInProgressError, GeminiError
 from app.services import analysis_lock as lock_service
 from app.services.analysis_service import perform_analysis
+from app.services.apify_service import ScrapedVideo
 from tests.conftest import USER_ID, FakeApify, FakeGemini, FakeYouTube
 from tests.fake_supabase import FakeStore
 
@@ -190,8 +191,38 @@ async def test_creator_id_sopravvive_a_una_rianalisi_sequenziale(
     """Il caso senza alcuna concorrenza, che è quello che rendeva il difetto
     quotidiano: il cron analizza in INFO, l'utente più tardi chiede BOTH. La
     riga non copre la modalità, si rianalizza, e prima della correzione la
-    riscrittura cancellava il creator."""
+    riscrittura cancellava il creator.
+
+    **La watchlist è popolata di proposito, con un creator diverso da quello
+    già sull'insight.** Senza questa riga il test resterebbe verde per la
+    ragione sbagliata: `_creator_seguito` non troverebbe nulla, restituirebbe
+    `None`, e il comportamento prima e dopo l'introduzione della deduzione
+    sarebbe indistinguibile. Con la riga, la deduzione è **attiva e punta
+    altrove** — cioè esercita davvero la garanzia in esame: un'attribuzione
+    dedotta non sostituisce quella in archivio.
+    """
     settings = get_settings()
+
+    # L'autore scrapato corrisponde a un creator seguito, che però NON è quello
+    # con cui il cron ha attribuito la riga: è la collisione che il difetto
+    # trasformava in una sovrascrittura silenziosa.
+    concorrente = store.seed(
+        "creators",
+        {
+            "user_id": USER_ID,
+            "username": "creator",
+            "platform": "tiktok",
+            "analysis_mode": "BOTH",
+            "is_active": True,
+        },
+    )
+    assert concorrente["id"] != CREATOR_ID
+    apify.resolved = ScrapedVideo(
+        video_url=VIDEO_URL,
+        download_url="https://cdn.example.com/video-123.mp4",
+        duration_seconds=42.0,
+        author_username="creator",
+    )
 
     await _analizza(
         user_id=USER_ID, video_url=VIDEO_URL, mode="INFO",
@@ -205,9 +236,54 @@ async def test_creator_id_sopravvive_a_una_rianalisi_sequenziale(
     )
 
     riga = store.rows("insights")[0]
-    assert riga["creator_id"] == CREATOR_ID
+    assert riga["creator_id"] == CREATOR_ID, (
+        "la deduzione ha sostituito l'attribuzione del cron: il creator dedotto "
+        "non deve entrare nel payload dell'upsert"
+    )
+    assert riga["creator_id"] != concorrente["id"]
     # La rianalisi è avvenuta davvero: il test non passa per un cache hit.
     assert riga["style_data"] is not None
+
+
+async def test_la_deduzione_riempie_solo_una_riga_senza_creator(
+    app: Any,
+    store: FakeStore,
+    gemini: FakeGemini,
+    apify: FakeApify,
+) -> None:
+    """Il complemento del test qui sopra, e il suo falsificatore.
+
+    Se la deduzione non sovrascrivesse *perché non funziona più*, il test
+    precedente sarebbe verde per assenza di comportamento. Qui la stessa
+    watchlist e lo stesso autore, ma su una riga che il creator non ce l'ha:
+    l'attribuzione deve comparire. Le due asserzioni insieme dicono che la
+    deduzione è viva e che è conservativa — nessuna delle due da sola basta.
+    """
+    settings = get_settings()
+
+    seguito = store.seed(
+        "creators",
+        {
+            "user_id": USER_ID,
+            "username": "creator",
+            "platform": "tiktok",
+            "analysis_mode": "BOTH",
+            "is_active": True,
+        },
+    )
+    apify.resolved = ScrapedVideo(
+        video_url=VIDEO_URL,
+        download_url="https://cdn.example.com/video-123.mp4",
+        duration_seconds=42.0,
+        author_username="creator",
+    )
+
+    await _analizza(
+        user_id=USER_ID, video_url=VIDEO_URL, mode="BOTH",
+        settings=settings, gemini=gemini, apify=apify,
+    )
+
+    assert store.rows("insights")[0]["creator_id"] == seguito["id"]
 
 
 async def test_il_cron_puo_valorizzare_creator_id_su_una_riga_che_non_ce_l_ha(

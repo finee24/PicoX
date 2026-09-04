@@ -425,8 +425,11 @@ def test_un_attribuzione_fallita_non_fa_fallire_l_analisi(
     Sarebbe un errore su un'analisi **riuscita e gia' pagata**: l'insight e' in
     archivio, la quota consumata, l'inferenza conclusa. E il messaggio
     parlerebbe di una risorsa che l'utente non ha mai nominato nella richiesta.
-    Si perde l'attribuzione, che il cron o una rianalisi possono recuperare;
-    non il lavoro, che non si recupera.
+    Si perde l'attribuzione — **definitivamente**, per una riga `BOTH`: il cron
+    non ritorna sui video che hanno gia' un insight e la rianalisi manuale e' un
+    cache hit, dove il creator non viene dedotto. Si sceglie comunque questa
+    perdita perche' l'alternativa e' perdere il lavoro, che non torna indietro
+    ne' lui ne' la quota che e' costato.
     """
     _segui(store)
     apify.resolved = _video_di("creator")
@@ -530,3 +533,68 @@ async def test_le_piattaforme_verificate_restano_deducibili(
         )
 
         assert await _creator_seguito(USER_ID, scrapato) == seguito["id"]
+
+
+def test_una_ricerca_del_creator_fallita_non_fa_perdere_l_analisi(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    store: FakeStore,
+    apify: FakeApify,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """La meta' mancante della guardia sull'attribuzione.
+
+    `_creator_seguito` gira **dentro** il lock, **dopo** `_consuma_quota` e
+    **dopo** `scrape_content`. Quando la sua `select` su `creators` falliva —
+    basta un `57014`, statement timeout, che e' un transitorio del database e
+    non un difetto nostro — l'eccezione risaliva fino al client:
+
+        503 database_unavailable
+        analysis_events: 1   <- quota consumata
+        insights: 0          <- niente in archivio
+        apify: 1 chiamata    <- pagata
+
+    Cioe' l'utente pagava una quota e il progetto una run Apify, e non restava
+    nulla. Per un passo che serve solo a **collegare** un video a un creator, ed
+    e' lo stesso ragionamento per cui l'attribuzione vera e' gia' non fatale.
+    """
+    from app.services import analysis_service
+
+    _segui(store)
+    apify.resolved = _video_di("creator")
+
+    originale = analysis_service.service_table
+    tentativi = {"select": 0}
+
+    class TavoloConSelectRotta:
+        def __init__(self, reale: Any) -> None:
+            self._reale = reale
+
+        def __getattr__(self, nome: str) -> Any:
+            return getattr(self._reale, nome)
+
+        def select(self, *args: Any, **kwargs: Any) -> Any:
+            tentativi["select"] += 1
+            raise FakeAPIError("57014", "canceling statement due to statement timeout")
+
+    async def rotta(tabella: str, user_id: str) -> Any:
+        tavolo = await originale(tabella, user_id)
+        return TavoloConSelectRotta(tavolo) if tabella == "creators" else tavolo
+
+    monkeypatch.setattr(analysis_service, "service_table", rotta)
+
+    risposta = client.post(
+        "/api/v1/analyze-video",
+        headers=auth_headers,
+        json={"video_url": VIDEO_URL, "analysis_mode": "BOTH"},
+    )
+
+    assert tentativi["select"] == 1, "la ricerca del creator non e' stata raggiunta"
+    assert risposta.status_code == 201, risposta.text
+    corpo = risposta.json()
+    # Il lavoro c'e' tutto: e' cio' che non deve andare perso.
+    assert corpo["summary_data"] is not None
+    assert corpo["style_data"] is not None
+    assert store.count("insights") == 1
+    # Manca solo il collegamento, che e' la cosa che si puo' perdere.
+    assert corpo["creator_id"] is None

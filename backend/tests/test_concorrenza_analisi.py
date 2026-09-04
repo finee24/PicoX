@@ -29,6 +29,7 @@ from app.core.config import get_settings
 from app.core.exceptions import AnalysisInProgressError, GeminiError
 from app.schemas.insights import InsightResponse
 from app.services import analysis_lock as lock_service
+from app.services import analysis_service
 from app.services.analysis_service import _assicura_attribuzione, perform_analysis
 from app.services.apify_service import ScrapedVideo
 from tests.conftest import USER_ID, FakeApify, FakeGemini, FakeYouTube
@@ -437,6 +438,7 @@ async def test_attesa_scaduta_risponde_409(
 async def test_un_record_stantio_non_sovrascrive_l_attribuzione_in_archivio(
     app: Any,
     store: FakeStore,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """La guardia che vive nel `WHERE`, non in memoria.
 
@@ -479,9 +481,39 @@ async def test_un_record_stantio_non_sovrascrive_l_attribuzione_in_archivio(
     # richiesta in corso si porta dietro dal proprio upsert.
     stantio = InsightResponse.model_validate({**riga, "creator_id": None})
 
+    # **Il contatore che rende il test bilaterale.** Le asserzioni sulla riga
+    # dicono solo che non e' cambiata, cosa vera anche se il passo non fosse
+    # stato tentato affatto: senza questo, il test resta verde con
+    # `_assicura_attribuzione` ridotta a un no-op. Il proxy delega l'`update`
+    # vero — conta soltanto — quindi la guardia che si vuole verificare gira
+    # per davvero.
+    tentativi = {"update": 0}
+    originale = analysis_service.service_table
+
+    class TavoloCheConta:
+        def __init__(self, reale: Any) -> None:
+            self._reale = reale
+
+        def __getattr__(self, nome: str) -> Any:
+            return getattr(self._reale, nome)
+
+        def update(self, *args: Any, **kwargs: Any) -> Any:
+            tentativi["update"] += 1
+            return self._reale.update(*args, **kwargs)
+
+    async def contando(tabella: str, user_id: str) -> Any:
+        tavolo = await originale(tabella, user_id)
+        return TavoloCheConta(tavolo) if tabella == "insights" else tavolo
+
+    monkeypatch.setattr(analysis_service, "service_table", contando)
+
     dedotto = "99999999-8888-7777-6666-555555555555"
     restituito = await _assicura_attribuzione(stantio, USER_ID, dedotto)
 
+    assert tentativi["update"] == 1, (
+        "l'update non e' stato eseguito: la riga e' intatta per la ragione "
+        "sbagliata, e il test non sta verificando la guardia"
+    )
     assert store.rows("insights")[0]["creator_id"] == CREATOR_ID, (
         "un'attribuzione dedotta ha sovrascritto quella scritta da un'altra "
         "richiesta: la UPDATE deve filtrare su `creator_id is null`"

@@ -32,7 +32,7 @@ from typing import Any, Final
 from uuid import UUID
 
 from app.core.config import Settings
-from app.core.exceptions import AnalysisInProgressError
+from app.core.exceptions import AnalysisInProgressError, PicoxError
 from app.schemas.analysis import AnalysisMode, VideoAnalysisResponse
 from app.schemas.creators import clean_username
 from app.schemas.insights import InsightResponse
@@ -207,6 +207,23 @@ def _componi_payload_insight(
     return payload
 
 
+# Piattaforme per cui `ScraperResult.author_username` è un **identificatore**
+# scelto in fase di registrazione e non modificabile a piacere, cioè l'unica
+# condizione che rende sensato dedurne il creator.
+#
+# Va estesa **solo** dopo aver verificato quella proprietà sul provider di
+# quella piattaforma, non per simmetria: il campo ha un contratto dichiarato
+# («Handle di chi ha pubblicato», `schemas/scraping.py`) che il percorso YouTube
+# già viola di proposito, e `apify_service._AUTHOR_KEYS` mescola chiavi-handle
+# (`ownerUsername`, `authorUsername`) e chiavi-nome-visualizzato (`channelName`,
+# `channelTitle`) prendendo la prima che risponde. Una piattaforma nuova che
+# ricadesse sulle seconde renderebbe l'attribuzione influenzabile da chi
+# pubblica il video.
+_PIATTAFORME_CON_HANDLE_AFFIDABILE: Final[frozenset[str]] = frozenset(
+    {"tiktok", "instagram"}
+)
+
+
 async def _creator_seguito(
     user_id: str, scraped: ScraperResult | None
 ) -> str | None:
@@ -236,17 +253,25 @@ async def _creator_seguito(
     `clean_username` è la stessa funzione che valida gli handle in ingresso, e
     qui fa anche da guardia sulle forme che handle non sono.
 
-    **`youtube_shorts` è escluso, e non per prudenza generica.** Su quel
-    percorso `author_username` è il **titolo** del canale, non l'handle:
-    `videos.list` non espone l'handle, servirebbe una `channels.list` sul
-    `channelId` (vedi il commento in `content_scraper`). Il titolo lo sceglie
-    chi possiede il canale, quindi non è un identificatore: chiunque può
-    intitolare il proprio canale `geopop` e — se la vittima analizza a mano uno
-    di quei video — farlo agganciare al creator sbagliato della *sua* watchlist.
-    `clean_username` non lo ferma, perché una parola sola alfanumerica è un
-    handle sintatticamente valido. La guardia sintattica scarta le forme
-    sbagliate, non le attribuzioni sbagliate: finché su YouTube non c'è un
-    handle vero da confrontare, qui non si deduce nulla.
+    **Si deduce solo dalle piattaforme in `_PIATTAFORME_CON_HANDLE_AFFIDABILE`,
+    e la lista è un'allowlist per un motivo preciso.** La proprietà su cui si
+    regge la sicurezza non è «non è YouTube»: è «su questa piattaforma
+    `author_username` è un *identificatore*, non un nome scelto da chi
+    pubblica». Con una lista di esclusioni, una quarta piattaforma nascerebbe
+    deducibile per default e nessuno se ne accorgerebbe; così nasce esclusa, e
+    per ammetterla qualcuno deve prima verificare quella proprietà.
+
+    `youtube_shorts` ne resta fuori perché lì `author_username` è il **titolo**
+    del canale: `videos.list` non espone l'handle, servirebbe una
+    `channels.list` sul `channelId` (vedi il commento in `content_scraper`), e
+    il ripiego su Apify non migliora le cose — `_AUTHOR_KEYS` prova
+    `channelUsername` ma ricade su `channelName`/`channelTitle`. Il titolo lo
+    sceglie chi possiede il canale, quindi chiunque può intitolare il proprio
+    `geopop` e — se la vittima analizza a mano uno di quei video — farlo
+    agganciare al creator sbagliato della *sua* watchlist. `clean_username` non
+    lo ferma, perché una parola sola alfanumerica è un handle sintatticamente
+    valido: la guardia sintattica scarta le forme sbagliate, non le
+    attribuzioni sbagliate.
 
     **Il risultato non entra nel payload dell'upsert.** Chi chiama applica
     l'attribuzione dedotta con `_assicura_attribuzione`, che riempie solo se la
@@ -266,13 +291,13 @@ async def _creator_seguito(
     if scraped is None or not scraped.author_username.strip():
         return None
 
-    # Vedi la docstring: qui `author_username` è il titolo del canale, che lo
-    # sceglie un terzo. Nessuna deduzione è meglio di una deduzione influenzabile
-    # da chi pubblica il video.
-    if scraped.platform == "youtube_shorts":
+    # Allowlist, non denylist: vedi la docstring. Una piattaforma non ancora
+    # verificata è esclusa per costruzione, non per dimenticanza.
+    if scraped.platform not in _PIATTAFORME_CON_HANDLE_AFFIDABILE:
         logger.debug(
-            "Deduzione del creator non applicabile su youtube_shorts: "
-            "l'autore noto è il titolo del canale, non l'handle."
+            "Deduzione del creator non applicabile su %s: l'autore noto non è "
+            "un handle verificato per questa piattaforma.",
+            scraped.platform,
         )
         return None
 
@@ -344,18 +369,49 @@ async def _assicura_attribuzione(
 
     L'aggiornamento è mirato e non tocca altro: solo la colonna, solo se è
     ancora vuota, filtrando su PK **e** proprietario.
+
+    **`is_("creator_id", "null")` non è ridondante rispetto alla guardia qui
+    sopra.** Quella legge uno *snapshot*: fra la lettura e questa `UPDATE` può
+    passare un'altra richiesta — un'altra modalità ha un lock proprio, quindi la
+    concorrenza è ammessa — e scrivere il creator. In quel caso `record` è
+    stantio, `record.creator_id` è ancora `None`, e l'unica cosa che impedisce
+    di sostituire l'attribuzione appena scritta è il `WHERE` lato database.
+
+    **Un fallimento qui non fa fallire la richiesta.** L'attribuzione è un
+    miglioramento accessorio su un risultato che, quando si arriva a questo
+    punto, è **già in archivio e già pagato** — l'inferenza Gemini è conclusa e
+    la quota consumata. Il caso concreto non è ipotetico: fra la lettura del
+    creator e questa scrittura c'è l'intera inferenza, minuti; se l'utente
+    cancella quel creator nel frattempo la FK verso `creators` viene violata
+    (`23503` → `ConflictError`) e senza questa guardia l'utente riceverebbe un
+    409 «Riferimento a una risorsa inesistente» su un'analisi **riuscita**, per
+    una risorsa che non ha mai nominato nella richiesta. Si perde
+    l'attribuzione, che è recuperabile; non il lavoro, che non lo è.
     """
     if not creator_id or record.creator_id is not None:
         return record
 
-    insights = await service_table("insights", user_id)
-    async with db_errors("attribuzione del creator su insight esistente"):
-        result = await (
-            insights.update({"creator_id": str(creator_id)})
-            .eq("id", str(record.id))
-            .is_("creator_id", "null")
-            .execute()
+    try:
+        insights = await service_table("insights", user_id)
+        async with db_errors("attribuzione del creator su insight esistente"):
+            result = await (
+                insights.update({"creator_id": str(creator_id)})
+                .eq("id", str(record.id))
+                .is_("creator_id", "null")
+                .execute()
+            )
+    except PicoxError:
+        # `warning` e non `error`: il servizio ha fatto il suo lavoro, manca un
+        # collegamento. `exc_info` resta fuori — questo percorso non è un guasto
+        # da diagnosticare ma un esito previsto (creator cancellato durante
+        # l'analisi), e il messaggio tradotto non porta credenziali.
+        logger.warning(
+            "Attribuzione del creator %s all'insight %s non riuscita: "
+            "l'analisi resta valida e viene restituita senza collegamento.",
+            creator_id,
+            record.id,
         )
+        return record
 
     if not result.data:
         # Un'altra richiesta l'ha attribuito nel frattempo: va bene così.

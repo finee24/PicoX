@@ -17,9 +17,11 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from app.schemas.scraping import ScraperResult
+from app.services.analysis_service import _creator_seguito
 from app.services.apify_service import ScrapedVideo
 from tests.conftest import OTHER_USER_ID, USER_ID, FakeApify, FakeYouTube
-from tests.fake_supabase import FakeStore
+from tests.fake_supabase import FakeAPIError, FakeStore
 
 VIDEO_URL = "https://www.tiktok.com/@creator/video/123"
 YOUTUBE_URL = "https://www.youtube.com/shorts/dQw4w9WgXcQ"
@@ -358,3 +360,173 @@ def test_una_riga_di_creators_senza_id_non_produce_un_500(
 
     assert risposta.status_code == 201, risposta.text
     assert risposta.json()["creator_id"] is None
+
+
+# =============================================================================
+# 6. Un'analisi riuscita non diventa un errore per colpa dell'attribuzione
+# =============================================================================
+
+
+def _rompi_attribuzione(monkeypatch: pytest.MonkeyPatch, codice: str) -> dict[str, int]:
+    """Fa fallire **solo** l'`update` su `insights`, non l'upsert.
+
+    I due passi usano la stessa `service_table("insights", ...)`: sostituire la
+    funzione intera romperebbe anche la scrittura dell'analisi, e il test
+    verificherebbe un percorso diverso da quello in esame.
+    """
+    from app.services import analysis_service
+
+    originale = analysis_service.service_table
+    tentativi = {"update": 0}
+
+    class TavoloConUpdateRotto:
+        """Delega tutto al `ScopedTable` vero, tranne `update`.
+
+        Un proxy e non un `setattr`: gli attributi di `ScopedTable` sono in sola
+        lettura. Delegando invece di reimplementare, l'upsert dell'analisi passa
+        dal codice reale — filtro sul proprietario incluso — e l'unico
+        comportamento alterato e' quello in esame.
+        """
+
+        def __init__(self, reale: Any) -> None:
+            self._reale = reale
+
+        def __getattr__(self, nome: str) -> Any:
+            return getattr(self._reale, nome)
+
+        def update(self, *args: Any, **kwargs: Any) -> Any:
+            tentativi["update"] += 1
+            raise FakeAPIError(
+                codice, "insert or update violates foreign key constraint"
+            )
+
+    async def rotta(tabella: str, user_id: str) -> Any:
+        tavolo = await originale(tabella, user_id)
+        return TavoloConUpdateRotto(tavolo) if tabella == "insights" else tavolo
+
+    monkeypatch.setattr(analysis_service, "service_table", rotta)
+    return tentativi
+
+
+def test_un_attribuzione_fallita_non_fa_fallire_l_analisi(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    store: FakeStore,
+    apify: FakeApify,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Il caso reale: il creator viene cancellato **durante** l'analisi.
+
+    Fra la lettura del creator e la scrittura dell'attribuzione c'e' l'intera
+    inferenza Gemini — minuti. Se in quella finestra l'utente cancella il
+    creator, la FK verso `creators` viene violata (`23503`), che
+    `translate_postgrest_error` mappa su `ConflictError` -> **409**.
+
+    Sarebbe un errore su un'analisi **riuscita e gia' pagata**: l'insight e' in
+    archivio, la quota consumata, l'inferenza conclusa. E il messaggio
+    parlerebbe di una risorsa che l'utente non ha mai nominato nella richiesta.
+    Si perde l'attribuzione, che il cron o una rianalisi possono recuperare;
+    non il lavoro, che non si recupera.
+    """
+    _segui(store)
+    apify.resolved = _video_di("creator")
+    tentativi = _rompi_attribuzione(monkeypatch, "23503")
+
+    risposta = client.post(
+        "/api/v1/analyze-video",
+        headers=auth_headers,
+        json={"video_url": VIDEO_URL, "analysis_mode": "BOTH"},
+    )
+
+    assert tentativi["update"] == 1, "il passo di attribuzione non e' stato raggiunto"
+    assert risposta.status_code == 201, risposta.text
+    corpo = risposta.json()
+    # L'analisi c'e' tutta: e' il punto per cui l'errore non deve risalire.
+    assert corpo["summary_data"] is not None
+    assert corpo["style_data"] is not None
+    # Manca solo il collegamento, ed e' l'unica cosa che deve mancare.
+    assert corpo["creator_id"] is None
+    assert store.count("insights") == 1
+
+
+# =============================================================================
+# 7. L'allowlist esclude per costruzione, non per dimenticanza
+# =============================================================================
+
+
+async def test_una_piattaforma_non_ancora_verificata_e_esclusa_di_default(
+    store: FakeStore,
+) -> None:
+    """La differenza fra allowlist e denylist, resa osservabile.
+
+    `threads` non esiste in `Platform` e non compare in nessuna lista di
+    esclusioni: e' esattamente la forma che avrebbe una piattaforma aggiunta
+    domani da chi non conosce questo vincolo. Con una denylist
+    (`if platform == "youtube_shorts"`) verrebbe dedotta, perche' nessuno ha
+    scritto il suo nome da nessuna parte; con l'allowlist e' fuori senza che
+    nessuno debba ricordarsene.
+
+    `model_construct` salta la validazione di proposito: `Platform` e' un
+    `Literal` chiuso, quindi la piattaforma di domani oggi **non si puo'
+    costruire** per le vie normali — ed e' il motivo per cui questo caso non
+    sarebbe emerso da un test end-to-end.
+    """
+    seguito = store.seed(
+        "creators",
+        {
+            "user_id": USER_ID,
+            "username": "creator",
+            "platform": "threads",
+            "analysis_mode": "BOTH",
+            "is_active": True,
+        },
+    )
+
+    futura = ScraperResult.model_construct(
+        # `type: ignore` deliberato, ed e' meta' del test: `Platform` e' un
+        # `Literal` chiuso, quindi il type checker rifiuta un valore che oggi
+        # non esiste. E' precisamente la situazione da simulare — il codice deve
+        # reggere una piattaforma che nessuno ha ancora dichiarato, e per
+        # scriverne il caso bisogna uscire dai tipi correnti.
+        platform="threads",  # type: ignore[arg-type]
+        author_username="creator",
+        video_bytes_url="https://cdn.example.com/video.mp4",
+    )
+
+    assert await _creator_seguito(USER_ID, futura) is None, (
+        "una piattaforma fuori dall'allowlist e' stata dedotta: l'esclusione "
+        "deve valere per costruzione, non per enumerazione dei casi noti"
+    )
+    # Il creator c'e' davvero e l'handle corrisponde: se l'esclusione non
+    # scattasse, ci sarebbe qualcosa da agganciare. Senza questa riga il test
+    # potrebbe passare solo perche' la watchlist e' vuota.
+    assert seguito["username"] == "creator"
+
+
+async def test_le_piattaforme_verificate_restano_deducibili(
+    store: FakeStore,
+) -> None:
+    """Il falsificatore dell'allowlist.
+
+    Se l'allowlist fosse vuota, o non contenesse le piattaforme giuste, il test
+    qui sopra sarebbe verde per la ragione sbagliata: nessuna deduzione da
+    nessuna parte. Qui le due ammesse devono ancora funzionare.
+    """
+    for piattaforma in ("tiktok", "instagram"):
+        seguito = store.seed(
+            "creators",
+            {
+                "user_id": USER_ID,
+                "username": f"creator_{piattaforma}",
+                "platform": piattaforma,
+                "analysis_mode": "BOTH",
+                "is_active": True,
+            },
+        )
+        scrapato = ScraperResult.model_construct(
+            platform=piattaforma,
+            author_username=f"creator_{piattaforma}",
+            video_bytes_url="https://cdn.example.com/video.mp4",
+        )
+
+        assert await _creator_seguito(USER_ID, scrapato) == seguito["id"]

@@ -32,7 +32,7 @@ from typing import Any, Final
 from uuid import UUID
 
 from app.core.config import Settings
-from app.core.exceptions import AnalysisInProgressError, PicoxError
+from app.core.exceptions import AnalysisInProgressError, ConflictError, DatabaseError
 from app.schemas.analysis import AnalysisMode, VideoAnalysisResponse
 from app.schemas.creators import clean_username
 from app.schemas.insights import InsightResponse
@@ -310,14 +310,34 @@ async def _creator_seguito(
         return None
 
     creators = await service_table("creators", user_id)
-    async with db_errors("ricerca del creator seguito"):
-        result = await (
-            creators.select("id", "username")
-            .eq("platform", scraped.platform)
-            .eq("is_active", True)
-            .order("created_at")
-            .execute()
+    try:
+        async with db_errors("ricerca del creator seguito"):
+            result = await (
+                creators.select("id", "username")
+                .eq("platform", scraped.platform)
+                .eq("is_active", True)
+                .order("created_at")
+                .execute()
+            )
+    except (ConflictError, DatabaseError):
+        # Simmetrico alla guardia di `_assicura_attribuzione`, e per la stessa
+        # ragione — qui anzi più forte. Questa lettura gira **dentro** il lock,
+        # **dopo** `_consuma_quota` e **dopo** `scrape_content`: quando fallisce,
+        # la quota giornaliera è già stata scritta e la run Apify già pagata. Un
+        # transitorio del database (un `57014`, non un difetto nostro) farebbe
+        # quindi perdere all'utente un'analisi che ha pagato e al progetto una
+        # chiamata al provider, **senza scrivere nulla in archivio** — per un
+        # passo che serve solo a collegare un video a un creator.
+        #
+        # Il perimetro è quello che `db_errors` può produrre qui, non
+        # `PicoxError`: un `AnalysisQuotaError` o un `GlobalCapacityError` non
+        # nascono da questa `select`, e ingoiarli sarebbe nascondere un limite
+        # che l'utente deve vedere.
+        logger.warning(
+            "Ricerca del creator seguito non riuscita: l'analisi prosegue "
+            "senza attribuzione automatica."
         )
+        return None
 
     atteso = handle.casefold()
     # PostgREST tipizza `data` come JSON generico; qui le righe sono oggetti.
@@ -385,14 +405,29 @@ async def _assicura_attribuzione(
     cancella quel creator nel frattempo la FK verso `creators` viene violata
     (`23503` → `ConflictError`) e senza questa guardia l'utente riceverebbe un
     409 «Riferimento a una risorsa inesistente» su un'analisi **riuscita**, per
-    una risorsa che non ha mai nominato nella richiesta. Si perde
-    l'attribuzione, che è recuperabile; non il lavoro, che non lo è.
+    una risorsa che non ha mai nominato nella richiesta.
+
+    **L'attribuzione persa qui è persa per sempre, e il warning è l'unica
+    traccia.** Non è il baratto fra "una cosa recuperabile e una no" che sembra:
+    per una riga `BOTH` — il default — nessuno dei due canali di recupero
+    esiste. Il cron non ci ritorna, perché `_filter_already_analyzed` esclude i
+    video che hanno già un insight; la rianalisi manuale è un cache hit, e lì
+    `perform_analysis` passa il `creator_id` del *chiamante*, che sul percorso
+    manuale è `None` — quindi si esce subito, senza dedurre nulla (vedi la
+    docstring di `_creator_seguito`). Il recupero funziona solo chiedendo una
+    modalità **più ampia** di quella archiviata, e più ampia di `BOTH` non ce
+    n'è. Si sceglie comunque questa perdita perché l'alternativa è perdere il
+    lavoro: l'inferenza è conclusa e la quota consumata, e nessuna delle due
+    torna indietro.
     """
     if not creator_id or record.creator_id is not None:
         return record
 
+    # Fuori dal `try`: `service_table` non produce errori di database ma di
+    # configurazione (`RuntimeError` su uno `user_id` vuoto), che devono
+    # continuare a risalire — sono difetti nostri, non transitori del provider.
+    insights = await service_table("insights", user_id)
     try:
-        insights = await service_table("insights", user_id)
         async with db_errors("attribuzione del creator su insight esistente"):
             result = await (
                 insights.update({"creator_id": str(creator_id)})
@@ -400,7 +435,7 @@ async def _assicura_attribuzione(
                 .is_("creator_id", "null")
                 .execute()
             )
-    except PicoxError:
+    except (ConflictError, DatabaseError):
         # `warning` e non `error`: il servizio ha fatto il suo lavoro, manca un
         # collegamento. `exc_info` resta fuori — questo percorso non è un guasto
         # da diagnosticare ma un esito previsto (creator cancellato durante
